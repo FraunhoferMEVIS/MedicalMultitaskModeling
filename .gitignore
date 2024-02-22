@@ -1,0 +1,7 @@
+**/*.egg-info
+dist
+wandb
+docs/build/
+docs/source/auto
+**/*.pyc
+**/*.ipynb_checkpoints

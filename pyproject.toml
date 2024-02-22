@@ -1,0 +1,103 @@
+[tool.poetry]
+name = "MedicalMultitaskModeling"
+version = "1.0.0"
+description = "Multitask learning framework for medical data"
+authors = [
+    "Raphael Schäfer <jan.raphael.schaefer@mevis.fraunhofer.de>",
+    "Till Nicke <till.nicke@mevis.fraunhofer.de>",
+]
+license = "All rights reserved."
+readme = "README.md"
+packages = [{ include = "mmm" }]
+include = [{ path = "**/*.jinja2", format = ["sdist", "wheel"] }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+wandb = "^0.16.3"
+torch = { url = "https://download.pytorch.org/whl/cu121/torch-2.1.2%2Bcu121-cp310-cp310-linux_x86_64.whl" }
+torchvision = "^0.16.2"
+scikit-learn = "^1.3.1"
+numpy = "^1.26.1"
+pydantic = "^2.4.2"
+tqdm = "^4.66.1"
+imageio = "^2.31.5"
+pandas = "^2.1.1"
+monai = "^1.3.0"
+albumentations = "^1.3.1"
+deepdiff = "^6.6.1"
+opencv-python = "^4.8.1.78"
+patchify = "^0.2.3"
+rasterio = "^1.3.9"
+shapely = "^2.0.2"
+tiffslide = "^2.2.0"
+torchinfo = "^1.8.0"
+json5 = "^0.9.14"
+pydantic-settings = "^2.0.3"
+segmentation-models-pytorch = { git = "https://github.com/Telcrome/segmentation_models.pytorch" }
+minio = "^7.1.17"
+
+# Optional dependencies which are used in extra groups, maintained by hand
+# By design of Poetry, these cannot be specified using optional dependency groups!
+# In other words, place them in the main dependencies but as optional!
+
+# Api
+fastapi = { extras = ["all"], version = "^0.104.1", optional = true }
+aiohttp = { version = "^3.9.0", optional = true }
+lightgbm = { version = "^4.1.0", optional = true }
+label-studio-converter = { version = "^0.0.55", optional = true }
+label-studio-sdk = { version = "^0.0.32", optional = true }
+# Export
+onnx = { version = "^1.13.1", optional = true }
+onnxruntime = { version = "^1.14.1", optional = true }
+# Interactive
+plotly = { version = "^5.17.0", optional = true }
+ipywidgets = { version = "^8.1.1", optional = true }
+ipykernel = { version = "^6.25.2", optional = true }
+matplotlib = { version = "^3.8.0", optional = true }
+seaborn = { version = "^0.13.0", optional = true }
+streamlit = { version = "^1.28.1", optional = true }
+nbformat = {version = "^5.9.2", optional = true}
+# Testing
+pytest = { version = "^8.0.0", optional = true }
+pytest-cov = { version = "^4.0.0", optional = true }
+black = { version = "^23.1.0", optional = true }
+isort = { version = "^5.10.1", optional = true }
+# Detection
+mmdet = { version = "^3.2.0", optional = true }
+mmcv = { url = "https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.0/mmcv-2.1.0-cp310-cp310-manylinux1_x86_64.whl", optional = true }
+
+
+[tool.poetry.group.deploy]
+optional = true
+[tool.poetry.group.deploy.dependencies]
+build = "^0.10.0"
+twine = "^4.0.2"
+
+[tool.poetry.extras]
+api = [
+    "fastapi",
+    "aiohttp",
+    "lightgbm",
+    "label-studio-converter",
+    "label-studio-sdk",
+]
+detection = ["mmdet", "mmcv"]
+interactive = [
+    "plotly",
+    "ipywidgets",
+    "ipykernel",
+    "matplotlib",
+    "seaborn",
+    "streamlit",
+    "nbformat",
+]
+testing = ["pytest", "pytest-cov", "black", "isort"]
+export = ["onnx", "onnxruntime"]
+
+[[tool.poetry.source]]
+name = "PyPI"
+priority = "primary"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

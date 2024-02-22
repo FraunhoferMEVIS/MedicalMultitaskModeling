@@ -1,0 +1,174 @@
+stages:
+  - prepare
+  - build
+  - test
+  - deploy
+
+default:
+  tags:
+    - b0
+
+cache:
+  key:
+    files:
+      - poetry.lock
+      - .gitlab-ci.yml
+    prefix: ${CI_JOB_NAME}
+  paths:
+    - .venv
+    - .cache/pip
+
+# Most jobs that need the version should depend on this job: e.g. by using `needs: [get-version]`
+# Here, we use the 1.0.0 version because it has poetry installed
+get-version:
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-base:1.0.0
+  stage: prepare
+  script:
+    # Starting from Gitlab 13.9, this enables other jobs to access the variable
+    - echo "PKGVERSION=$(poetry version -s)" >> deploy.env
+  artifacts:
+    reports:
+      dotenv: deploy.env
+
+# Run static analysis: black
+black:
+  image: python:3.10-bullseye
+  stage: prepare
+  before_script:
+    - pip install black
+  script:
+    - black --check --line-length 120 --diff mmm tests
+
+test-no-extras:
+  # The default user in the image matters when discovering tools such as pytest
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  variables:
+    ML_DATA_CACHE: ./local_testing_cache/
+  needs: [get-version]
+  stage: test
+  before_script:
+    - poetry config virtualenvs.in-project true
+    - poetry install -E testing
+  script:
+    - poetry run pytest --doctest-modules --cov=mmm tests mmm -k "not test_convergence and not test_api and not test_export" --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+test-extra-export:
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  variables:
+    ML_DATA_CACHE: ./local_testing_cache/
+  needs: [get-version]
+  stage: test
+  before_script:
+    - poetry config virtualenvs.in-project true
+    - poetry install -E testing -E export
+  script:
+    - poetry run pytest tests/test_export.py --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+test-extra-api:
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  variables:
+    ML_DATA_CACHE: ./local_testing_cache/
+  needs: [get-version]
+  stage: test
+  before_script:
+    - poetry config virtualenvs.in-project true
+    # Needs detection as well because it serves detection tasks
+    - poetry install -E testing -E api -E detection
+  script:
+    - poetry run pytest tests/test_api.py --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+test-mtl-convergence:
+  # The default user in the image matters when discovering tools such as pytest
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  variables:
+    ML_DATA_CACHE: ./local_testing_cache/
+  needs: [get-version]
+  stage: test
+  before_script:
+    - poetry config virtualenvs.in-project true
+    - poetry install -E testing
+  script:
+    - nvidia-smi
+    - poetry run pytest --doctest-modules --cov=mmm tests mmm -k "test_convergence" --junitxml=report_convergence.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report_convergence.xml
+
+update-python-package:
+  only:
+    - main
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  stage: deploy
+  needs: [test-no-extras, test-mtl-convergence, test-extra-api, test-extra-export, get-version]
+  before_script:
+    - poetry config virtualenvs.in-project true
+    - poetry config repositories.gitlab ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
+    - poetry install --with deploy
+  script:
+    - poetry run python3 -V
+    - poetry build
+    - poetry publish --repository gitlab --username gitlab-ci-token --password ${CI_JOB_TOKEN} --skip-existing
+  artifacts:
+    paths:
+      - mmm/dist/*.whl
+
+# This requires to setup the Harbor integration in Gitlab settings
+build-and-publish-base-image:
+  timeout: 3h 30m
+  when: manual
+  stage: build
+  services:
+    - docker:20.10.22-dind
+  image: docker:20.10.22
+  before_script:
+    - docker info
+    - echo "$FHGHARBORPASS" | docker login -u $FHGHARBORUSER --password-stdin $FHGHARBORHOST
+  script:
+    - docker build -t baseimage $CI_PROJECT_DIR/docker/mmm-base
+
+    # Tag with pkgversion
+    - docker tag baseimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGVERSION
+    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGVERSION
+    # Tag with short commit hash as well
+    - docker tag baseimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$CI_COMMIT_SHORT_SHA
+    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$CI_COMMIT_SHORT_SHA
+    # Tag with escaped branch name as well, e.g. feature/branch -> feature-branch
+    - docker tag baseimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:${CI_COMMIT_REF_NAME//\//-}
+    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:${CI_COMMIT_REF_NAME//\//-}
+
+build-and-publish-stack-image:
+  timeout: 3h 30m
+  when: manual
+  stage: build
+  services:
+    - docker:20.10.22-dind
+  image: docker:20.10.22
+  before_script:
+    - echo "$FHGHARBORPASS" | docker login -u $FHGHARBORUSER --password-stdin $FHGHARBORHOST
+  script:
+    # Use the Dockerfile located in $CI_PROJECT_DIR/docker/mmm-stack, build context should still be $CI_PROJECT_DIR
+    - docker build -t stackimage --build-arg PKGVERSION=$PKGVERSION -f $CI_PROJECT_DIR/docker/mmm-stack/Dockerfile $CI_PROJECT_DIR/ --no-cache
+
+
+    # Tag with pkgversion
+    - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$PKGVERSION
+    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$PKGVERSION
+    # Tag with short commit hash as well
+    - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$CI_COMMIT_SHORT_SHA
+    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$CI_COMMIT_SHORT_SHA
+    # Tag with escaped branch name as well, e.g. feature/branch -> feature-branch
+    - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:${CI_COMMIT_REF_NAME//\//-}
+    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:${CI_COMMIT_REF_NAME//\//-}
