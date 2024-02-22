@@ -1,0 +1,9 @@
+<h3>{{ config.category }} at {{ prefix }}</h3>
+<p>maxUsages of the brushlabels are only used to filter the predicted regions during inference.</p>
+<p>Region scores are computed using the mean of all pixels above the threshold inside that region</p>
+{% for (project_id, label_key), model in model.segmentors.items() %}
+<h4>Project: {{ project_id }}, label: {{ label_key }}</h4>
+<p>For classes: {{ model.class_names }}</p>
+<p>Model config: {{ model.model_cfg }}</p>
+<p>Model stats: NOT IMPLEMENTED</p>
+{% endfor %}

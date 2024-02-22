@@ -1,0 +1,176 @@
+# This Docker Compose configuration is intended for local development purposes only.
+# It includes settings that are insecure and not suitable for production environments.
+version: '3'
+
+services:
+
+  reverse-proxy:
+    image: traefik:v2.10
+    # Enables the web UI and tells Traefik to listen to docker
+    command: --api.insecure=true --providers.docker
+    restart: unless-stopped
+    ports:
+      # The HTTP port
+      - "9500:80"
+      # The Web UI (enabled by --api.insecure=true)
+      - "9501:8080"
+    volumes:
+      # So that Traefik can listen to the Docker events
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  inference-api:
+    profiles: [ inference ]
+    network_mode: "host"
+    restart: unless-stopped
+    depends_on:
+      - labelstudio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    ports:
+      - 9504:9504
+    volumes:
+      - ${MTL_MODULES_DIR:-/data/}:/data
+    environment:
+      - MTL_MODULES_DIR=/data
+      - MTLAPI_modules_path=${MTLAPI_modules_path}
+      - MTLAPI_labelstudio_base=${MTLAPI_labelstudio_base:-http://localhost:9505}
+    # labels:
+    #   - traefik.http.routers.inference-api.rule=Host(`inference.datanodefec`)
+
+  minios3:
+    # To enable using the data without authentication, use presigned URLs or
+    # mc anonymous set download datanodefec/dataroot to make the bucket "dataroot" public
+    # Direct path example: http:IP:PORT_TO_MINIOAPI=9502/BUCKETNAME/OBJECT/PATH.png
+    image: minio/minio:RELEASE.2023-10-16T04-13-43Z
+    ports:
+      - 9502:9000
+      - 9503:9503
+    volumes:
+      - ${DATAROOT:-/data/}/minios3/:/data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      # If a user accesses the api via the browser, redirect to the console
+      - MINIO_BROWSER_REDIRECT_URL=http://s3admin.datanodefec:9500
+    command: server /data --console-address ":9503"
+    restart: unless-stopped
+    labels:
+      # Requires that the host s3admin.datanodefec and s3.datanodefec are resolvable!
+      # Usually, this is done by adding two! entries to to /etc/hosts.
+      - traefik.http.routers.minio.rule=Host(`s3.datanodefec`)
+      - traefik.http.routers.minio.service=minio
+      - traefik.http.services.minio.loadbalancer.server.port=9000
+      - traefik.http.routers.minio-console.service=minio-console
+      - traefik.http.routers.minio-console.rule=Host(`s3admin.datanodefec`)
+      - traefik.http.services.minio-console.loadbalancer.server.port=9503
+
+  labelstudio:
+    image: heartexlabs/label-studio:1.9.2
+    # Labelstudio needs to see other services not in the same compose network for webhooks
+    network_mode: "host"
+    ports:
+      - 9505:9505
+    volumes:
+      - ${DATAROOT:-/data/}/labelstudio:/label-studio/data
+      # It might be useful to enable labelstudio to export to a local volume:
+      - ${DATAROOT:-/data/}/labelstudio-output/:/outputfolder
+    environment:
+      # - LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true
+      - LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true
+      - LABEL_STUDIO_USER_TOKEN=1234567890
+      - LABEL_STUDIO_USERNAME=default@user.de
+      - LABEL_STUDIO_PASSWORD=defaultpassword
+      - LABEL_STUDIO_PORT=9505
+      # Use postgres as database
+      - DJANGO_DB=default
+      - POSTGRE_NAME=postgres
+      - POSTGRE_USER=postgres
+      - POSTGRE_PASSWORD=postgres
+      - POSTGRE_PORT=5436
+      # Because of network mode host, we need to use localhost as host for the db
+      - POSTGRE_HOST=localhost
+      # - POSTGRE_HOST=labelstudio-db
+    depends_on:
+      - labelstudio-db
+      - wsi-service
+      - storage-mapper
+    command: label-studio
+    restart: unless-stopped
+    # There is a permission error, run as root
+    user: root
+    labels:
+      - traefik.http.routers.labelstudio.rule=Host(`labelstudio.datanodefec`)
+
+  labelstudio-db:
+    image: postgres:11.5
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+      - PGPORT=5436
+    volumes:
+      - ${DATAROOT:-/data/}/labelstudio-db:/var/lib/postgresql/data:rw
+      # - labelstudio-db:/var/lib/postgresql/data:rw
+    ports:
+      - 5436:5436
+
+  wsi-service:
+    # http://localhost:8081/v3/docs
+    image: registry.gitlab.com/empaia/services/wsi-service:0.12.8
+    # The WSI-service has a memory leak, so we need to restart it every now and then
+    # For example, using `watch -n 300 docker compose restart wsi-service`
+    restart: unless-stopped
+    ports:
+      - 9506:8080
+    volumes:
+      - ${DATAROOT:-/data/}/wsi-service/:/data
+    depends_on:
+      - storage-mapper
+    environment:
+      - WS_LOCAL_MODE=False
+      - WS_MAPPER_ADDRESS=http://storage-mapper:8000/v3/slides/{slide_id}
+      - WS_CORS_ALLOW_ORIGINS=["*"]
+      - WEB_CONCURRENCY=2
+      # Set the root-path
+      # - WS_ROOT_PATH=/wsi
+    labels:
+      - traefik.http.routers.wsi.rule=Host(`wsi.datanodefec`)
+
+  storage-mapper:
+    # http://localhost:8082/v3/docs
+    image: registry.gitlab.com/empaia/services/storage-mapper-service:0.3.3
+    ports:
+      - 9507:8000
+    depends_on:
+      - storage-mapper-service-db
+    environment:
+      - SM_DB_USERNAME=postgres
+      - SM_DB_PASSWORD=postgres
+      - SM_DB=postgres
+      - SM_DB_HOST=storage-mapper-service-db
+      - SM_DB_PORT=5432
+    restart: unless-stopped
+    labels:
+      - traefik.http.routers.storage-mapper.rule=Host(`storage-mapper.datanodefec`)
+
+  storage-mapper-service-db:
+    image: postgres:12
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ${DATAROOT:-/data/}/storage-mapper-service-db:/var/lib/postgresql/data:rw
+      # - storage-mapper-service-db:/var/lib/postgresql/data:rw
+    ports:
+      - 5432:5432
