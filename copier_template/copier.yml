@@ -1,0 +1,18 @@
+# questions
+project_name:
+    type: str
+    help: What is your experiment's name?
+    default: mmm-experiment
+
+use_gpu:
+    type: bool
+    help: Do you want to use GPU?
+    default: true
+
+dev_image:
+    type: str
+    help: What image to use? (stack for dependencies pre-installed, base for a minimal image)
+    choices:
+        - stack
+        - base
+    default: base

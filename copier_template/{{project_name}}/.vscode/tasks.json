@@ -1,0 +1,26 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "script-prepare-vscode",
+            "type": "shell",
+            "command": [
+                "code --install-extension ms-python.python",
+                " && code --install-extension eamodio.gitlens",
+                " && code --install-extension ms-toolsai.jupyter",
+                " && code --install-extension ms-python.black-formatter"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Prepare environment",
+            "command": [
+                "${command:workbench.action.reloadWindow}"
+            ],
+            "dependsOn": [
+                "script-prepare-vscode"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}

@@ -253,6 +253,7 @@ You can use this to get autocompletion in VSCode by appending to json.schemas li
 }}
 """
             )
+        env.get_schema_path().parent.mkdir(exist_ok=True)
         env.get_schema_path().write_text(json.dumps(cls.model_json_schema()))
 
     @staticmethod
