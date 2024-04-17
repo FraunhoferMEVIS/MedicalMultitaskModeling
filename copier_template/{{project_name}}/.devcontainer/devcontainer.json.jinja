@@ -1,0 +1,20 @@
+{
+    "name": "Dev container for {{project_name}}",
+    "image": "hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-{{dev_image}}:1.0.1",
+    "runArgs": [
+        {% if use_gpu %}
+        "--gpus=all", // Will error if no GPU is available
+        {% endif %}
+        "--shm-size=8gb" // required for PyTorch multiprocessing
+    ],
+    "remoteEnv": {
+        "LOCAL_DEV_ENV": "True" // Our code's output behaves differently for jobs or development
+    },
+    // Comment out mounts that you do not need:
+    "mounts": [
+        // Its often useful to also have access to the home directory
+        "source=${localEnv:HOME},target=/host-home/,type=bind,consistency=cached",
+        // Mount your SSH keys if you want to push directly from the container
+        // "source=${localEnv:HOME}/.ssh,target=/root/.ssh,type=bind,consistency=cached"
+    ]
+}
