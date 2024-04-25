@@ -1,4 +1,3 @@
-from typing import Dict
 import torch.nn as nn
 
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
@@ -14,7 +13,7 @@ class TaskModule(nn.Module):
     You should make sure the shared modules are using this task (set_active_task) before executing the forward pass.
     """
 
-    def __init__(self, task: MTLTask, shared_modules: Dict[str, SharedBlock]) -> None:
+    def __init__(self, task: MTLTask, shared_modules: dict[str, SharedBlock]) -> None:
         super().__init__()
         self.task = task
         self.shared_modules = nn.ModuleDict(shared_modules)

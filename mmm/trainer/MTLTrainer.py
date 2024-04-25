@@ -268,7 +268,7 @@ The parent folder where the trainer will store checkpoints.
         self,
         task_name: str,
         file_path: Path | None = None,
-        only_inference: bool = False,
+        only_inference: bool = True,
     ):
         """
         If file_path is none, will save to ./task_name.pt
