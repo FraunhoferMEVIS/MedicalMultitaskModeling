@@ -61,8 +61,11 @@ ENV PATH="${PATH}:/root/.local/bin/"
 RUN echo 'export PATH="${PATH}:/root/.local/bin/"' >> /root/.bashrc
 # Set the default editor to vscode
 RUN echo 'export EDITOR="code --wait"' >> /root/.bashrc
+# Add git completion
+RUN echo "source /usr/share/bash-completion/completions/git" >> ~/.bashrc
 
 RUN poetry config virtualenvs.create false
 
 # S3 tools
 RUN curl -sSL https://github.com/kahing/goofys/releases/latest/download/goofys -o /root/.local/bin/goofys && chmod +x /root/.local/bin/goofys
+RUN curl -sSL https://d.juicefs.com/install | sh -

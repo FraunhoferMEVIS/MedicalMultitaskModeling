@@ -8,9 +8,10 @@ client: Minio = Minio(*get_args(), **get_kwargs())
 """
 
 from __future__ import annotations
-from typing import Callable
+from typing import BinaryIO, Callable
 import os
 from pathlib import Path
+from pydantic import Field
 from mmm.utils import disk_cacher
 from mmm.BaseModel import BaseModel
 from io import BytesIO
@@ -32,6 +33,10 @@ def make_dataset_cached(*args, **kwargs):
 
 
 class S3ImageFolder(ImageFolder):
+    """
+    Listing many files with S3 is slow. This class behaves like ImageFolder, but it caches the file list.
+    """
+
     @staticmethod
     def make_dataset(
         directory: str,
@@ -121,29 +126,3 @@ def upload_img(
     img_bytes.seek(0)
     r = mclient.put_object(bucket, f"{prefix}/{img_name}.png", img_bytes, length=img_bytes.getbuffer().nbytes)
     return {"data": {data_key: f"{base_url}/{bucket}/{prefix}/{img_name}.png"}}
-
-
-class S3Path(BaseModel):
-    bucket: str
-    path: str
-
-    @classmethod
-    def from_str(cls, s3path: str) -> S3Path:
-        bucket, path = s3path.split("://")[1].split("/", 1)
-        return cls(bucket=bucket, path=path)
-
-    def download(self, client: Minio | None = None) -> BytesIO:
-        """
-        Uses default environment variables to connect to the S3 bucket if client is None.
-        """
-        if client is None:
-            client = Minio(*get_args(), **get_kwargs())
-        return download_object(client, self.bucket, self.path)
-
-    def exists(self, client: Minio | None = None) -> bool:
-        if client is None:
-            client = Minio(*get_args(), **get_kwargs())
-        try:
-            return client.bucket_exists(self.bucket) and client.stat_object(self.bucket, self.path)
-        except S3Error:
-            return False

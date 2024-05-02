@@ -158,7 +158,7 @@ class MultiLabelSemSegDataset(MTLDataset):
         from mmm.logging.st_ext import stw, st
 
         stw("### Untransformed image:")
-        img, masks = case.pop("image"), case.pop("masks")
+        img, masks = case["image"], case["masks"]
 
         anno_img = AnnotatedImage(
             image=RGBImage(data=img),

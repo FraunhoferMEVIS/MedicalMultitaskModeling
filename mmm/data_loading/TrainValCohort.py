@@ -178,6 +178,7 @@ while keeping a minimum of one worker per task.
                 batch_size=self.args.batch_size[0],
                 num_workers=self.args.num_workers,
                 pin_memory=self.args.pin_memory,
+                # Usually, this only improves performance, but it is important for federated learning.
                 persistent_workers=self.args.num_workers > 0,
             )
             val_loader = self.datasets[1].get_dataloader(
@@ -185,6 +186,7 @@ while keeping a minimum of one worker per task.
                 batch_size=self.args.batch_size[1],
                 num_workers=self.args.num_workers,
                 pin_memory=self.args.pin_memory,
+                # Usually, this only improves performance, but it is important for federated learning.
                 persistent_workers=self.args.num_workers > 0,
             )
 

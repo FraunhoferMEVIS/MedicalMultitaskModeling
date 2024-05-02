@@ -13,11 +13,14 @@
 import os
 import sys
 import toml
+from pathlib import Path
 
 print(os.listdir())
-with open("../../pyproject.toml") as f:
-    parsed_toml = toml.load(f)
-
+toml_path = Path(__file__).parent.parent / "pyproject.toml"
+if not toml_path.exists():
+    toml_path = Path(__file__).parent.parent.parent / "pyproject.toml"
+if toml_path.exists():
+    parsed_toml = toml.loads(toml_path.read_text())
 
 sys.path.insert(0, os.path.abspath("../.."))
 

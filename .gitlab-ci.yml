@@ -82,6 +82,7 @@ test-extra-api:
     - poetry config virtualenvs.in-project true
     # Needs detection as well because it serves detection tasks
     - poetry install -E testing -E api -E detection
+    - juicefs mount redis://10.142.32.21:9508/1 /jfs -d
   script:
     - poetry run pytest tests/test_api.py --junitxml=report.xml
   artifacts:
@@ -160,7 +161,7 @@ build-and-publish-stack-image:
     - echo "$FHGHARBORPASS" | docker login -u $FHGHARBORUSER --password-stdin $FHGHARBORHOST
   script:
     # Use the Dockerfile located in $CI_PROJECT_DIR/docker/mmm-stack, build context should still be $CI_PROJECT_DIR
-    - docker build -t stackimage --build-arg PKGVERSION=$PKGVERSION -f $CI_PROJECT_DIR/docker/mmm-stack/Dockerfile $CI_PROJECT_DIR/ --no-cache
+    - docker build -t stackimage --build-arg PKGVERSION=$PKGVERSION -f $CI_PROJECT_DIR/docker/mmm-stack/Dockerfile $CI_PROJECT_DIR/
 
 
     # Tag with pkgversion

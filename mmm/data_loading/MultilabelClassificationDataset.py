@@ -95,7 +95,7 @@ class MultilabelClassificationDataset(MTLDataset):
         from mmm.logging.st_ext import blend_with_mask
 
         st.title("Untransformed image:")
-        im = case.pop("image")
+        im = case["image"]
         blend_with_mask(im, None, caption_suffix=f"Shape: {im.shape}", st_key=f"c{i}")
         self._print_relevant_classes(
             case["class_labels"],

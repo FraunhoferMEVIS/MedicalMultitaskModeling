@@ -51,6 +51,10 @@ class NICConfig(cfs.BaseModel):
 
 
 class NICTask(ClassificationTask):
+    """
+    A classification task that processes neural image representations [C, H, W].
+    """
+
     class Config(ClassificationTask.Config):
         pass
 
@@ -151,7 +155,7 @@ def compute_positions(dimsizes, stepsize):
 
 def read_regions(
     slide: ts.TiffSlide,
-    positions,
+    positions: list,
     tile_edgelength: int,
     patch_edge_length: int,
     level=0,
@@ -366,38 +370,3 @@ def write_nic_from_list(
             if not out_path.exists():
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(nic, out_path)
-
-
-# def write_semicol_nics(encoder: blocks.PyramidEncoder, outfolder: Path, patch_size:int, level:int):
-#     num_workers = len(os.sched_getaffinity(0))
-# semicol_root = Path("/input/data/histo_root/SemiCOL/")
-# trainweak_root = semicol_root / "DATASET_TRAIN/02_weak/02_WEAK"
-# traintiffs = list(trainweak_root.glob("**/*.tiff"))
-# traintiffs.sort()
-
-
-# def write_tupac_nics(encoder: blocks.PyramidEncoder, outfolder: Path, patch_size:int, level:int):
-#     num_workers = len(os.sched_getaffinity(0))
-#     semicol_root = Path("/input/data/histo_root/SemiCOL/")
-#     trainweak_root = semicol_root / "DATASET_TRAIN/02_weak/02_WEAK"
-#     traintiffs = list(trainweak_root.glob("**/*.tiff"))
-#     traintiffs.sort()
-
-#     while not_yet_existing := [tiffpath
-#                     for tiffpath in traintiffs
-#                     if not get_output_path_of_tile(tiffpath, outfolder).exists()]:
-#         tiffpaths = random.sample(not_yet_existing, min(len(not_yet_existing), num_workers))
-#         representations = load_representations_for_tiffs(
-#             encoder,
-#             tiffpaths,
-#             num_workers=num_workers,
-#             patch_size=patch_size,
-#             level=level,
-#             max_pixels_per_batch=96*3*patch_size*patch_size)
-#         nics = {p: build_nic(representations[p]) for p in representations.keys()}
-
-#         for p, nic in nics.items():
-#             out_path = get_output_path_of_tile(p, outfolder)
-#             if not out_path.exists():
-#                 out_path.parent.mkdir(parents=True, exist_ok=True)
-#                 torch.save(nic, out_path)

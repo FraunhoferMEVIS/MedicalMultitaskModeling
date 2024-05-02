@@ -16,6 +16,14 @@ pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git
 pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git@<commit-hash>
 ```
 
+## Usage
+
+```bash
+# Start inference API on port 9504, then visit http://localhost:9504
+uvicorn api.api:app --port 9504 --host 0.0.0.0
+# Integrate into your own API via example code in mmm/inference_api.py
+```
+
 You can check the pyproject.toml file to see all available extras.
 
 ## Quickstart Guide
@@ -83,11 +91,18 @@ sudo apt install python3-opencv -y
 # Verify your GPU Docker setup using the hello-world image:
 docker run --rm --gpus=all hello-world
 # Only system requirements:
-docker pull hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-base:1.0.0
+MMMVERSION=$(poetry version -s) && docker pull hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-base:$MMMVERSION
 # Verify with
-docker run --rm -it --gpus=all hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-base:1.0.0 nvidia-smi
+MMMVERSION=$(poetry version -s) && docker run --rm -it --gpus=all hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-base:$MMMVERSION nvidia-smi
 # With dependencies pre-installed:
-docker pull hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:1.0.0
+MMMVERSION=$(poetry version -s) && docker pull hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$MMMVERSION
+```
+
+## Start local infrastructure and inference API with Docker Compose
+
+```bash
+# Start inference service in foreground
+MMMVERSION=$(poetry version -s) docker compose --profile inference up --build --remove-orphans -d
 ```
 
 ## Citation
@@ -104,3 +119,48 @@ If you use this project, please cite [our work](https://doi.org/10.48550/arXiv.2
       primaryClass={cs.CV}
 }
 ```
+
+# Repository Structure
+
+For more detailed information, please refer to the docstrings within each directory.
+
+- **torch_ext**: Contains Torch utilities that, while not specific to multi-task learning, can simplify its implementation. This includes our caching utilities.
+- **task_sampling**: Provides utilities for enumerating tasks in a way that integrates with PyTorch.
+- **inference_api**: starting point to our inference and few-shot-training FastAPI
+
+### data_loading 
+
+This directory contains tools for loading medical data and annotations, supporting formats such as NIfTI, DICOM, and GeoJSON.
+It also contains the annotation type specific dataset wrappers such as `SemSegDataset`, responsible for data verification and visualization.
+
+### interactive
+
+This directory has been restructured to allow for easy importing in interactive environments like Jupyter. For instance, you can import several modules with a single line:
+
+```python
+from mmm.interactive import blocks, configs as cfs, data, tasks, training, pipes
+```
+
+### logging 
+
+Here you'll find utilities that integrate with our logging and visualization tools.
+
+### mtl_modules 
+
+This directory houses multi-task learning types, such as `PyramidEncoder`, and specific tasks.
+
+### neural 
+
+This directory contains PyTorch modules that are not based on our multi-task learning types.
+
+### optimization
+
+This is the home of `MTLOptimizer`. It integrates several PyTorch optimizers with our training strategy and employs the `ZeroRedundancyOptimizer` strategy for distributed training.
+
+### resources
+
+This directory contains static files, like HTML templates for logging.
+
+### trainer
+
+The `Loop` class, used by the `MtlTrainer` class to execute multi-task learning, is located here.

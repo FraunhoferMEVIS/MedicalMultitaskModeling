@@ -7,5 +7,5 @@ FROM hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-base:$PKGVERSION
 # Install python dependencies from pyproject.toml
 COPY . /installation-medicalmultitaskmodeling
 RUN poetry config virtualenvs.create false
-RUN poetry install --no-root --without=dev --no-interaction --no-ansi --directory=/installation-medicalmultitaskmodeling
+RUN poetry install --no-root --no-interaction --no-ansi --directory=/installation-medicalmultitaskmodeling -E testing -E api -E detection
 RUN rm -rf /installation-medicalmultitaskmodeling

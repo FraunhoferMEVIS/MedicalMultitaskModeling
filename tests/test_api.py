@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 
 from mmm.data_loading.medical.wsi_service import WSIService
+from mmm.data_loading.DistributedPath import DistributedPath
 
 try:
     from fastapi.testclient import TestClient
@@ -18,7 +19,6 @@ try:
         SingleInvocation,
     )
     from mmm.labelstudio_ext.LGBModel import LGBModel
-    from mmm.data_loading.s3 import S3Path
 except ImportError:
     pass
 
@@ -51,28 +51,24 @@ def api_client() -> TestClient:
     params=[
         "s3://dataroot/histoartefact_preannotation/SynD_0_001.svs",
         "s3://dataroot/semicol/DATASET_VAL/02_BX/2pT4GFzn.ome.tiff",
-        "s3://dataroot/panda/train_images/4b77f015acc40c7e39470f3ebb658818.tiff",
+        "/jfs/panda/train_images/4b77f015acc40c7e39470f3ebb658818.tiff",
     ]
 )
 def example_wsi(request) -> str:
     return request.param
-    # wsi_path = Path(request.param)
-    # if not request.param.startswith("s3://") and not wsi_path.exists():
-    #     pytest.skip(f"WSI {wsi_path} not available")
-    # return wsi_path
 
 
 def test_tiffslide_available(wsi_service: WSIService):
     status = requests.get(wsi_service.get_is_alive_route()).json()
     plugin_names = [d["name"] for d in status["plugins"]]
-    assert "tiffslide" in plugin_names, "MTL Torch is only tested with wsi service with tiffslide plugin"
+    assert "tiffslide" in plugin_names, "MMM is only tested with wsi service with tiffslide plugin"
 
-    assert status["version"].startswith("0.12."), "MTL Torch is only tested with wsi service 0.12.x"
+    assert status["version"].startswith("0.12."), "MMM is only tested with wsi service 0.12.x"
 
 
 def test_api_initialization(api_client: TestClient):
     status = api_client.get("/status").json()
-    modules_path: S3Path = S3Path(**status["modules_path"])
+    modules_path: DistributedPath = DistributedPath(**status["modules_path"])
     assert modules_path.exists(), f"Testing the api requires trained MTL modules"
 
 
