@@ -57,10 +57,6 @@ class ClassificationTask(MTLTask):
         )
         loss_fn: Annotated[LossConfigs, Field(discriminator="loss_type")] = CrossEntropyLossConfig()
         dropout: float = 0.2
-        global_pooling: GlobalPoolingConfig = Field(
-            default=GlobalPoolingConfig(pooling_type=GlobalPooling.AveragePooling),
-            description="Adaptive pooling to reduce the dimensions of the last tensor before the latent space z.",
-        )
         metrics: Optional[List[Literal["confusion matrix", "accuracy", "top5accuracy", "auc", "f1"]]] = Field(
             default=None,
             description="If none, the task will decide which metrics make sense",
@@ -107,7 +103,6 @@ class ClassificationTask(MTLTask):
             self.task_modules = self._create_smart_head()
 
         self._grouper_weights = None
-        self.pooling: nn.Module = self.args.global_pooling.build_instance()
         self.flatten = nn.Flatten(1)
         self.criterion: nn.Module = self.args.loss_fn.build_instance()
 
@@ -151,8 +146,8 @@ class ClassificationTask(MTLTask):
     def forward(self, inputs, shared_blocks: Dict[str, SharedBlock]):
         x, supercase_indexes = inputs
         pyr = shared_blocks[self.args.encoder_key](x)
-        squeezed = shared_blocks[self.args.squeezer_key](pyr)
-        hidden_vector = self.flatten(self.pooling(squeezed))
+        _, hidden_vector = shared_blocks[self.args.squeezer_key](pyr)
+        hidden_vector = self.flatten(hidden_vector)
 
         if self.args.grouper_key:
             hidden_vector, self._grouper_weights = shared_blocks[self.args.grouper_key](

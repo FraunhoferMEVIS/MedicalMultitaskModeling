@@ -163,6 +163,7 @@ class MMDetectionTask(MTLTask):
     class Config(MTLTask.Config):
         encoder_key: str = "encoder"
         decoder_key: str = "fcosfpn"
+        squeezer_key: str = "squeezer"
         min_threshold_for_metrics: float = Field(
             default=0.05,
             description="Threshold after which confidence score boxes are considered in metric computation",
@@ -240,6 +241,11 @@ class MMDetectionTask(MTLTask):
 
     def forward(self, x: Any, shared_blocks: Dict[str, SharedBlock]):
         pyr = shared_blocks[self.args.encoder_key](x)
+
+        # for Backward compatibility
+        if hasattr(self.args, "squeezer_key") and self.args.squeezer_key in list(shared_blocks.keys()):
+            pyr[-1], _ = shared_blocks[self.args.squeezer_key](pyr)
+
         cls_features, reg_features = shared_blocks[self.args.decoder_key](pyr)
         cls_score, bbox_pred, centerness = self.task_modules["head"].forward(cls_features, reg_features)
         return cls_score, bbox_pred, centerness

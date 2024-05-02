@@ -36,10 +36,6 @@ class RegressionTask(MTLTask):
         squeezer_key: str = "squeezer"
         loss_fn: Annotated[LossConfigs, Field(discriminator="loss_type")] = MSELossConfig()
         dropout: float = 0.2
-        global_pooling: GlobalPoolingConfig = Field(
-            default=GlobalPoolingConfig(pooling_type=GlobalPooling.AveragePooling),
-            description="Adaptive pooling to reduce the dimensions of the last tensor before the latent space z.",
-        )
         metrics: Optional[List[Literal["mae", "mse", "rmse", "max_error", "r2_score"]]] = Field(
             default=None,
             description="If none, the task will decide which metrics make sense",
@@ -55,7 +51,6 @@ class RegressionTask(MTLTask):
             self.task_modules = self._create_pretraining_head()
         else:
             self.task_modules = self._create_smart_head()
-        self.pooling: nn.Module = self.args.global_pooling.build_instance()
         self.flatten = nn.Flatten(1)
         self.criterion: nn.Module = self.args.loss_fn.build_instance()
 
@@ -84,8 +79,8 @@ class RegressionTask(MTLTask):
     def forward(self, inputs, shared_blocks: Dict[str, SharedBlock]):
         x, _ = inputs
         pyr = shared_blocks[self.args.encoder_key](x)
-        squeezed = shared_blocks["squeezer"](pyr)
-        hidden_vector = self.flatten(self.pooling(squeezed))
+        _, squeezed = shared_blocks["squeezer"](pyr)
+        hidden_vector = self.flatten(squeezed)
 
         return self.task_modules["regression_head"](hidden_vector)
 
