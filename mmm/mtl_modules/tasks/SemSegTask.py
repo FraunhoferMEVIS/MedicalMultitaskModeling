@@ -181,6 +181,7 @@ class SemSegTask(MTLTask):
     class Config(MTLTask.Config):
         encoder_key: str = "encoder"
         decoder_key: str = "decoder"
+        squeezer_key: str = "squeezer"
         decoder_type: Literal["pyramid", "mtldecoder"] = "pyramid"
         loss: Literal["dicefocal"] = "dicefocal"
         dropout: float = 0.0
@@ -243,6 +244,10 @@ class SemSegTask(MTLTask):
 
     def forward(self, x: Dict[str, Any], shared_blocks: Dict[str, SharedBlock]):
         feat = shared_blocks[self.args.encoder_key](x)
+
+        # for Backward compatibility
+        if hasattr(self.args, "squeezer_key") and self.args.squeezer_key in list(shared_blocks.keys()):
+            feat[-1], _ = shared_blocks[self.args.squeezer_key](feat)
 
         if self.args.dropout > 0.0:
             feat = [feat[0]] + [self.task_modules["dropout"][i](f) for i, f in enumerate(feat[1:])]  # type: ignore

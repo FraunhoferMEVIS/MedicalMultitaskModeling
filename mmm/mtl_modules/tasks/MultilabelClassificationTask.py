@@ -44,10 +44,6 @@ class MultilabelClassificationTask(MTLTask):
         confidence_threshold: float = 0.5
         dropout: float = 0.2
         metrics: List[Literal["acc", "f1", "auc"]] = ["acc", "auc"]
-        global_pooling: GlobalPoolingConfig = Field(
-            default=GlobalPoolingConfig(pooling_type=GlobalPooling.AveragePooling),
-            description="Adaptive pooling to reduce the dimensions of the last tensor before the latent space z.",
-        )
 
     def __init__(
         self,
@@ -60,7 +56,6 @@ class MultilabelClassificationTask(MTLTask):
         self.hidden_dim: int = hidden_dim
         self.class_names: List[str] = cohort.datasets[0].class_names
 
-        self.pooling: nn.Module = self.args.global_pooling.build_instance()
         self.flatten = nn.Flatten(1)
         self.task_modules = nn.ModuleDict(
             {
@@ -83,8 +78,8 @@ class MultilabelClassificationTask(MTLTask):
         # assert shared_blocks[self.args.encoder_key].training == self.training,\
         #     f"Encoder is in different state than {self.get_name()}"
         pyr = shared_blocks[self.args.encoder_key](x)
-        squeezed = shared_blocks["squeezer"](pyr)
-        hidden_vector = self.flatten(self.pooling(squeezed))
+        _, squeezed = shared_blocks["squeezer"](pyr)
+        hidden_vector = self.flatten(squeezed)
         out = self.task_modules["classification_head"](hidden_vector)
         return out
 

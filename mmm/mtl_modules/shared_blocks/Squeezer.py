@@ -22,6 +22,7 @@ class Squeezer(SharedBlock):
             """,
         )
         activation: ActivationFunctionConfig = ActivationFunctionConfig(fn_type=ActivationFn.GeLU)
+        use_channel_attention: bool = False
 
     def __init__(self, args: Config, enc_out_channels: list[int], enc_strides: list[int]):
         super().__init__(args)
@@ -44,14 +45,26 @@ class Squeezer(SharedBlock):
             else nn.Identity()
         )
         self.activation = args.activation.build_instance()
+        self.avg = nn.AdaptiveAvgPool2d((1, 1))
+        if self.args.use_channel_attention:
+            self.m = nn.AdaptiveMaxPool2d((1, 1))
         self.make_mtl_compatible()
 
     def get_hidden_dim(self) -> int:
         return self.args.out_channels if self.args.out_channels > 0 else self.enc_out_channels[-1]
 
-    def forward(self, feature_pyramid: list[torch.Tensor]) -> torch.Tensor:
+    def forward(self, feature_pyramid: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         # The order is inspired by torchvision.ops.misc.ConvNormActivation
-        return self.activation(self.norm(self.conv(feature_pyramid[-1])))
+        # experimental setting to increase the influence between pyramidal and pooling tasks
+        if self.args.use_channel_attention:
+            atten = self.avg(feature_pyramid[-1]) + self.m(feature_pyramid[-1])
+            feat_latent = self.norm(self.conv(atten))
+            feat = self.norm(self.conv(feature_pyramid[-1]))
+            return self.activation(feat + feat_latent), self.activation(feat_latent)
+        else:
+            return self.activation(self.norm(self.conv(feature_pyramid[-1]))), self.activation(
+                self.norm(self.conv(self.avg(feature_pyramid[-1])))
+            )
 
     def get_example_input(self) -> ModelInput | Tuple[ModelInput, ...]:
         return [torch.rand(1, self.enc_out_channels[-1], 7, 7).to(self.torch_device)]
