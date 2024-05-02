@@ -34,6 +34,8 @@ services:
     build:
       context: .
       dockerfile: api/Dockerfile
+      args:
+        - MMMVERSION=${MMMVERSION}
     ports:
       - 9504:9504
     volumes:
@@ -42,6 +44,7 @@ services:
       - MTL_MODULES_DIR=/data
       - MTLAPI_modules_path=${MTLAPI_modules_path}
       - MTLAPI_labelstudio_base=${MTLAPI_labelstudio_base:-http://localhost:9505}
+      - ML_DATA_OUTPUT=${ML_DATA_OUTPUT:-/data/inference_cache}
     # labels:
     #   - traefik.http.routers.inference-api.rule=Host(`inference.datanodefec`)
 
@@ -71,6 +74,18 @@ services:
       - traefik.http.routers.minio-console.service=minio-console
       - traefik.http.routers.minio-console.rule=Host(`s3admin.datanodefec`)
       - traefik.http.services.minio-console.loadbalancer.server.port=9503
+
+  # Can be used as a metadata store for high-performance filesystems like JuiceFS
+  # juicefs format --storage minio --bucket http://localhost:9502/juicedata  --access-key minioadmin --secret-key minioadmin "redis://localhost:9508/1" juicedata
+  redis:
+    image: redis:7.2
+    restart: unless-stopped
+    ports:
+      - 9508:6379
+    volumes:
+      - ${DATAROOT:-/data/}/redis/:/data
+    labels:
+      - traefik.http.routers.redis.rule=Host(`redis.datanodefec`)
 
   labelstudio:
     image: heartexlabs/label-studio:1.9.2

@@ -25,6 +25,7 @@ from mmm.labelstudio_ext.LSModel import LSModel, LabelStudioTask, SerializedArra
 from mmm.labelstudio_ext.utils import download_image
 from mmm.labelstudio_ext.utils import binary_mask_to_result
 from mmm.labelstudio_ext.NativeBlocks import NativeBlocks
+from mmm.data_loading.DistributedPath import DistributedPath
 from mmm.transforms import UnifySizes
 from mmm.BaseModel import BaseModel
 from mmm.mtl_modules.tasks.SemSegTask import SemSegTask
@@ -110,7 +111,7 @@ class WSIInvocation(BaseModel):
     """
 
     invocation_type: Literal["wsi"] = "wsi"
-    wsi_path: str
+    wsi_path: DistributedPath
     mtl_task_id: str
     for_levels: list[int] = [0]
     out_downsample_fac: int = Field(
@@ -150,13 +151,7 @@ class WSIInvocation(BaseModel):
 
     async def wsi_inference(self, torch_modules: NativeBlocks):
         mtl_task: SemSegTask = torch_modules[self.mtl_task_id]
-
-        if self.wsi_path.startswith("s3://"):
-            from mmm.data_loading.s3 import S3Path
-
-            slide = TiffSlide(S3Path.from_str(self.wsi_path).download())
-        else:
-            slide = TiffSlide(Path(self.wsi_path))
+        slide = TiffSlide(self.wsi_path.file().open())
 
         assert len(self.for_levels) == 1, "For now, only single-level inference is implemented"
 

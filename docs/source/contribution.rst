@@ -1,6 +1,12 @@
 Contribution
 ============
 
+Git Troubleshooting
+-------------------
+
+- I merged an external feature branch into my local feature branch. Now the external feature branch was squashed and merged into main. How do I update my local feature branch?
+  - Start a new branch from main and apply patches like `git diff main..your_local_feature_branch > patch.diff` and `git apply patch.diff`.
+
 Formatting
 ----------
 

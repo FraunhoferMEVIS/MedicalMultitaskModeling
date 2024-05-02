@@ -129,7 +129,7 @@ class ClassificationDataset(MTLDataset):
                 else:
                     st.write(f"THIS CLASS ({i}): {class_name}")
 
-        im = case.pop("image")
+        im = case["image"]
         blend_with_mask(im, None, caption_suffix=f"Shape: {im.shape}", st_key=f"c{i}")
         st.write(case)
 

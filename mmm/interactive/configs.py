@@ -108,6 +108,7 @@ class EnvByConvention:
         self.data_root = Path(os.getenv("ML_DATA_ROOT", default="/data_root/"))
         self.data_cache = Path(os.getenv("ML_DATA_CACHE", default="/dl_cache/"))
         self.data_output = Path(os.getenv("ML_DATA_OUTPUT", default="/data_output/"))
+        self.juicefs_mount = Path(os.getenv("ML_JUICEFS_MOUNT", default="/jfs/"))
         self.interactive_environment = os.getenv("LOCAL_DEV_ENV", default="False") == "True"
         self.job_config_folder: Path = Path("./job_configs/")
         self.rank = int(os.getenv("RANK", default="0"))
@@ -136,7 +137,8 @@ class EnvByConvention:
         return self
 
     def __repr__(self) -> str:
-        res = f"{self.data_root=}\n{self.data_output=}\n" f"{self.data_cache=}\n{self.interactive_environment=}\n"
+        res = f"{self.data_root=}\n{self.data_output=}\n{self.juicefs_mount=}\n"
+        res += f"{self.data_cache=}\n{self.interactive_environment=}\n"
         return res
 
 
@@ -253,7 +255,7 @@ You can use this to get autocompletion in VSCode by appending to json.schemas li
 }}
 """
             )
-        env.get_schema_path().parent.mkdir(exist_ok=True)
+        env.get_schema_path().parent.mkdir(exist_ok=True, parents=True)
         env.get_schema_path().write_text(json.dumps(cls.model_json_schema()))
 
     @staticmethod

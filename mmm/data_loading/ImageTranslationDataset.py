@@ -33,9 +33,9 @@ class ImageTranslationDataset(MTLDataset):
 
         st.title("Untransformed image:")
 
-        im = case.pop("image")
+        im = case["image"]
         blend_with_mask(im, None, caption_suffix=f"Shape: {im.shape}")
-        targetim = case.pop("targetimage")
+        targetim = case["targetimage"]
         blend_with_mask(targetim, None, caption_suffix=f"Shape: {targetim.shape}")
         st.write(case)
 

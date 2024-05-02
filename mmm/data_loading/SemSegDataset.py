@@ -22,7 +22,7 @@ class SemSegDataset(MTLDataset):
     ) -> None:
         assert class_names is not None, "Segmentation dataset needs class names"
         self.class_names: List[str] = class_names
-        super().__init__(src_ds, ["image", "label"], ["original_size", "meta"], *args, **kwargs)
+        super().__init__(src_ds, ["image", "label"], ["original_shape", "meta"], *args, **kwargs)
 
     def set_classes_for_visualization(self, classes: List[str]):
         self.class_names = classes
@@ -42,8 +42,8 @@ class SemSegDataset(MTLDataset):
 
         st.title("Untransformed image:")
         blend_with_mask(
-            case.pop("image"),
-            case.pop("label"),
+            case["image"],
+            case["label"],
             classes=self.class_names,
             st_key=f"c{i}",
         )

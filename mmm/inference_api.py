@@ -14,7 +14,7 @@ try:
 except ImportError:
     pass
 
-from mmm.data_loading.s3 import S3Path
+from mmm.data_loading.DistributedPath import DistributedPath
 from mmm.labelstudio_ext.DLModel import DLModel
 from mmm.labelstudio_ext.LGBModel import LGBModel
 from mmm.labelstudio_ext.NativeBlocks import NativeBlocks
@@ -25,7 +25,7 @@ class APISettings(BaseSettings):
     class Config:
         env_prefix = "MTLAPI_"
 
-    modules_path: S3Path = S3Path(bucket="output", path="mum_modules/mum_t27_32_1_e32.pt")
+    modules_path: DistributedPath = DistributedPath(uri="/jfs/output/mum_modules/mum_t45_48_msd3_e121.pt")
     labelstudio_base: str = "http://datanodefec:9505"
     labelstudio_token: str = "1234567890"
     annotator_base: str = Field(
@@ -55,7 +55,7 @@ def build_app(settings: APISettings) -> FastAPI:
     creds = LabelstudioCredentials(url=settings.labelstudio_base, token=settings.labelstudio_token)
     ls_client: Client = creds.build_client()
 
-    nativeblocks = NativeBlocks(settings.modules_path.download(), settings.device_identifier)
+    nativeblocks = NativeBlocks(settings.modules_path.file().open(), settings.device_identifier)
 
     dlmodel = DLModel(
         settings.dlconfig,

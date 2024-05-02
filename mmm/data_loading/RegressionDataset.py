@@ -25,7 +25,7 @@ class RegressionDataset(MTLDataset):
         import streamlit as st
 
         st.write(f"Target: {case['target']}")
-        im = case.pop("image")
+        im = case["image"]
         blend_with_mask(im, None, caption_suffix=f"Shape: {im.shape}", st_key=f"c{index}")
         st.write(case)
 
