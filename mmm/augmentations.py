@@ -26,7 +26,18 @@ def get_histo_augs(
     img_fill_value=(255, 255, 255), mask_fill_value=mtl_settings.ignore_class_value
 ) -> TransformsSeqType:
     return [
-        A.ToGray(p=0.2),
+        A.OneOf(  # Color variation (OneOf always executes exactly one if it is chosen)
+            [
+                # Included for positive transfer to grayscale images via multi-task learning
+                A.ToGray(p=0.2),
+                A.ChannelShuffle(p=0.2),
+                # Should approximate typical color variation in stains
+                A.HueSaturationValue(
+                    hue_shift_limit=30, sat_shift_limit=20, val_shift_limit=20, always_apply=False, p=0.7
+                ),
+            ],
+            p=0.5,
+        ),
         A.OneOf(
             [
                 A.CLAHE(clip_limit=2),
@@ -38,17 +49,11 @@ def get_histo_augs(
         ),
         A.OneOf(
             [
-                # A.IAAAdditiveGaussianNoise(),
                 A.RandomGamma(p=1),
                 A.GaussNoise(),
             ],
             p=0.3,
         ),
-        # A.OneOf([
-        #     A.OpticalDistortion(p=0.3),
-        #     A.GridDistortion(p=.1),
-        #     A.PiecewiseAffine(p=0.3),
-        # ], p=0.2),
         A.OneOf(
             [
                 A.MotionBlur(p=0.2),
@@ -60,7 +65,6 @@ def get_histo_augs(
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.ChannelShuffle(p=0.5),
         A.ShiftScaleRotate(
             rotate_limit=10,
             border_mode=cv2.BORDER_CONSTANT,
@@ -84,22 +88,13 @@ def get_weak_default_augs(img_fill_value=0, mask_fill_value=mtl_settings.ignore_
     Does not flip.
     """
     return [
-        # A.RandomRotate90(),
-        # A.Flip(),
-        # A.Transpose(),
         A.OneOf(
             [
-                # A.IAAAdditiveGaussianNoise(),
                 A.RandomGamma(p=1),
                 A.GaussNoise(),
             ],
             p=0.1,
         ),
-        # A.OneOf([
-        #     A.MotionBlur(p=.2),
-        #     A.MedianBlur(blur_limit=3, p=0.1),
-        #     A.Blur(blur_limit=3, p=0.1),
-        # ], p=0.2),
         A.ShiftScaleRotate(
             shift_limit=0.0625,
             scale_limit=0.1,
