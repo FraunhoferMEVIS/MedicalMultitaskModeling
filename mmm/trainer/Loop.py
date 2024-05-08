@@ -357,9 +357,9 @@ class Loop:
                             }
                         )
 
-                        step_log_dict[f"{step_prefix}memory/afterstep{task_uniqueness}"] = (
-                            torch.cuda.memory_allocated() / (1024**3)
-                        )
+                        step_log_dict[
+                            f"{step_prefix}memory/afterstep{task_uniqueness}"
+                        ] = torch.cuda.memory_allocated() / (1024**3)
                         step_log_dict[f"{step_prefix}memory/beforestep{task_uniqueness}"] = before_mem / (1024**3)
                         step_log_dict[f"{step_prefix}memory/beforeback{task_uniqueness}"] = before_backward_mem / (
                             1024**3

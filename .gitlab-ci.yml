@@ -32,10 +32,9 @@ get-version:
 
 # Run static analysis: black
 black:
-  image: python:3.10-bullseye
-  stage: prepare
-  before_script:
-    - pip install black
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  stage: test
+  needs: [get-version]
   script:
     - black --check --line-length 120 --diff mmm tests
 

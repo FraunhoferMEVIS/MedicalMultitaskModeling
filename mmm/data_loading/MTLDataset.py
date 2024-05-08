@@ -323,9 +323,12 @@ class MTLDataset(Dataset[SrcCaseType]):
         for d in iter(self.src_ds):
             if self.src_transform:
                 d = self.src_transform(d)
+
+            d = self.data_stripper(d)  # type: ignore
+
             if self.batch_transform is not None and apply_batchtransform:
                 d = self.batch_transform(d)
-            d = self.data_stripper(d)  # type: ignore
+
             yield d
 
     def get_untransformed_case(self, index: int) -> Any:
