@@ -148,9 +148,9 @@ class CyclicTaskSampler(BaseSampler):
 
     class Config(BaseSampler.Config):
         sampler_type: Literal["cyclic"] = "cyclic"
-        mode: Literal["break_with_shortest_loader", "break_with_longest_loader", "infinite"] = (
-            "break_with_longest_loader"
-        )
+        mode: Literal[
+            "break_with_shortest_loader", "break_with_longest_loader", "infinite"
+        ] = "break_with_longest_loader"
 
     def __init__(self, args: Config, tasks: List[MTLTask], loader_index: DataSplit):
         self.args: CyclicTaskSampler.Config

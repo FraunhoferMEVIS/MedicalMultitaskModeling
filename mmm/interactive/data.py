@@ -5,7 +5,7 @@ from mmm.data_loading.MultilabelClassificationDataset import (
     MultilabelClassificationDataset,
 )
 from mmm.data_loading.RegressionDataset import RegressionDataset
-from mmm.data_loading.ImageTranslationDataset import ImageTranslationDataset
+from mmm.data_loading.ImageGenerationDataset import ImageGenerationDataset
 from mmm.data_loading.SemSegDataset import SemSegDataset
 from mmm.data_loading.MultiLabelSemSegDataset import MultiLabelSemSegDataset
 from mmm.data_loading.DetectionDataset import DetectionDataset

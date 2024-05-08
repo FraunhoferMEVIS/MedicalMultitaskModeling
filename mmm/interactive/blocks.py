@@ -5,7 +5,7 @@ from mmm.mtl_modules.shared_blocks.MTLDecoder import MTLDecoder
 from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 
-from mmm.neural.modules.simple_cnn import MiniConvNet
+from mmm.neural.modules.simple_cnn import MiniConvNet, MiniDecoder
 from mmm.neural.modules.swinformer import TorchVisionSwinformer
 from mmm.neural.modules.TorchVisionCNN import TorchVisionCNN
 

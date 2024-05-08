@@ -87,9 +87,9 @@ The parent folder where the trainer will store checkpoints.
         )
         mtl_train_loop: TrainLoopConfig = TrainLoopConfig()
 
-        mtl_validation_selector: Annotated[EventSelector, Field(discriminator="selector_type")] = (
-            RecurringEventSelector(every_n=1)
-        )
+        mtl_validation_selector: Annotated[
+            EventSelector, Field(discriminator="selector_type")
+        ] = RecurringEventSelector(every_n=1)
         mtl_val_loop: ValLoopConfig = ValLoopConfig()
 
         early_stopping: EarlyStoppingConfig | None = None

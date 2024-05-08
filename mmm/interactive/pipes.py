@@ -24,5 +24,7 @@ from mmm.augmentations import (
     get_xray_augs,
     get_weak_default_augs,
     get_realworld_augs,
+    get_color_prediction_transform,
+    get_surrounding_prediction_transform,
 )
 from mmm.data_loading.MTLDataset import mtl_collate, mtl_batch_collate

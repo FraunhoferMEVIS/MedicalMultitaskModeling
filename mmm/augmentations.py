@@ -306,7 +306,10 @@ class MRI3DProcessor:
     def base_volume_augs(keys):
         return [
             monai_transforms.RandAdjustContrastD(keys=["image"], prob=0.1),
-            RandomApply(monai_transforms.RandScaleCropD(keys=keys, roi_scale=[0.8, 0.8, 0.8], random_size=True), p=0.3),
+            RandomApply(
+                monai_transforms.RandScaleCropD(keys=keys, roi_scale=[0.8, 0.8, 0.8], random_size=True),
+                p=0.3,
+            ),
         ]
 
     def __init__(self, args, augs_constructor: Optional[Callable], with_segmask: bool) -> None:
@@ -512,3 +515,45 @@ class RandomBlobAugmentation:
             blurred_mask = cv.blur(circle_mask, (data_x // rnd_blurr_divider, data_y // rnd_blurr_divider))
 
             return image * blurred_mask  # , blurred_mask
+
+
+class GenerativeTransform:
+    """
+    Designed to be used as target transform in the GenerativeDataset.
+    Receives two callable transforms, which modify the image input image.
+    """
+
+    def __init__(self, image_transform: Callable | None, target_transform: Callable | None) -> None:
+        self.it = image_transform
+        self.tt = target_transform
+
+    def __call__(self, case: dict[str, torch.Tensor]) -> Any:
+        res = {
+            "image": self.it(case["image"]) if self.it else case["image"],
+            "target": self.tt(case["image"]) if self.tt else case["image"],
+            "meta": case["meta"] if "meta" in list(case.keys()) else {},
+        }
+        return res
+
+
+def get_color_prediction_transform():
+    """
+    Reconstructing a normalized version of the input image
+    Standard ImageNet-based normalization used for RGB images
+    if working with 1 channel images, other normalzation should be used
+    """
+    return GenerativeTransform(
+        image_transform=None,
+        target_transform=transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+    )
+
+
+def get_surrounding_prediction_transform(center_crop: tuple[int]):
+    """
+    Reconstruction of the image itself and the surroundings.
+    To be used with the SEMSEG decoder or attention head.
+    """
+    return GenerativeTransform(
+        image_transform=transforms.RandomResizedCrop(size=center_crop),
+        target_transform=transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+    )

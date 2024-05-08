@@ -318,8 +318,8 @@ if __name__ == "__main__":
         )
         return data.TrainValCohort(
             cfs.TrainValCohortConfig(batch_size=8, num_workers=0),
-            data.ImageTranslationDataset(train_ds, src_transform=transforms.Compose(base_t + [augs])),
-            data.ImageTranslationDataset(val_ds, src_transform=transforms.Compose(base_t + [augs])),
+            data.ImageGenerationDataset(train_ds, src_transform=transforms.Compose(base_t + [augs])),
+            data.ImageGenerationDataset(val_ds, src_transform=transforms.Compose(base_t + [augs])),
         )
 
     def build_multilabelclf_cohort() -> TrainValCohort[MultilabelClassificationDataset]:
