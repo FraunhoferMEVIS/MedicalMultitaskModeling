@@ -17,6 +17,8 @@ from mmm.data_loading.SemSegDataset import SemSegDataset
 from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
 from mmm.data_loading.synthetic.shape_dataset import ShapeDataset, CanvasConfig
 from mmm.transforms import KeepOnlyKeysInDict
+from mmm.mtl_modules.shared_blocks.Grouper import Grouper
+
 
 from mmm.mtl_modules.shared_blocks.PyramidDecoder import PyramidDecoder
 
@@ -122,3 +124,17 @@ def shape_segtask_factory(shape_semseg_cohort: TrainValCohort):
         return mock_segtask
 
     return shape_segtask
+
+
+@pytest.fixture(
+    ids=["weighted", "attention", "gated-attention", "attention-4", "gated-attention-4"],
+    params=[
+        Grouper.Config(version="weighted", attention_heads=1),
+        Grouper.Config(version="attention", attention_heads=1),
+        Grouper.Config(version="gated-attention", attention_heads=1),
+        Grouper.Config(version="attention", attention_heads=4),
+        Grouper.Config(version="gated-attention", attention_heads=4),
+    ],
+)
+def grouper_args(request):
+    return request.param
