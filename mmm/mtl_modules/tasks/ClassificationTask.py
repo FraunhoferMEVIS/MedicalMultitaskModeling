@@ -176,7 +176,7 @@ class ClassificationTask(MTLTask):
             )
 
             # batch sizes might be unified here for some settings of the Grouper.
-            x = grouper.unify_bagsizes(bag=x, supercase_indices=supercase_indices)
+            # x = grouper.unify_bagsizes(bag=x, supercase_indices=supercase_indices)
 
             # the targets need to be grouped as well, currently y is a (B,) tensor with class indices
             # For each unique supercase index, we need to find the corresponding class index
