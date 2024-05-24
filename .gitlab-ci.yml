@@ -34,7 +34,7 @@ get-version:
 black:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   stage: test
-  needs: [get-version]
+  needs: [get-version, build-and-publish-stack-image]
   script:
     - black --check --line-length 120 --diff mmm tests
 
@@ -43,7 +43,7 @@ test-no-extras:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   variables:
     ML_DATA_CACHE: ./local_testing_cache/
-  needs: [get-version]
+  needs: [get-version, build-and-publish-stack-image]
   stage: test
   before_script:
     - poetry config virtualenvs.in-project true
@@ -59,7 +59,7 @@ test-extra-export:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   variables:
     ML_DATA_CACHE: ./local_testing_cache/
-  needs: [get-version]
+  needs: [get-version, build-and-publish-stack-image]
   stage: test
   before_script:
     - poetry config virtualenvs.in-project true
@@ -75,7 +75,7 @@ test-extra-api:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   variables:
     ML_DATA_CACHE: ./local_testing_cache/
-  needs: [get-version]
+  needs: [get-version, build-and-publish-stack-image]
   stage: test
   before_script:
     - poetry config virtualenvs.in-project true
@@ -94,7 +94,7 @@ test-mtl-convergence:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   variables:
     ML_DATA_CACHE: ./local_testing_cache/
-  needs: [get-version]
+  needs: [get-version, build-and-publish-stack-image]
   stage: test
   before_script:
     - poetry config virtualenvs.in-project true
@@ -128,13 +128,19 @@ update-python-package:
 # This requires to setup the Harbor integration in Gitlab settings
 build-and-publish-base-image:
   timeout: 3h 30m
-  when: manual
   stage: build
   services:
     - docker:20.10.22-dind
   image: docker:20.10.22
   before_script:
     - docker info
+    - >
+      if docker manifest inspect hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGVERSION > /dev/null; then
+        echo "Image for version $PKGVERSION exists. Skipping job."
+        exit 0
+      else
+        echo "Image does not exist. Proceeding with job."
+      fi
     - echo "$FHGHARBORPASS" | docker login -u $FHGHARBORUSER --password-stdin $FHGHARBORHOST
   script:
     - docker build -t baseimage $CI_PROJECT_DIR/docker/mmm-base
@@ -151,17 +157,23 @@ build-and-publish-base-image:
 
 build-and-publish-stack-image:
   timeout: 3h 30m
-  when: manual
   stage: build
+  needs: [get-version, build-and-publish-base-image]
   services:
     - docker:20.10.22-dind
   image: docker:20.10.22
   before_script:
+    - >
+      if docker manifest inspect hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$PKGVERSION > /dev/null; then
+        echo "Image for version $PKGVERSION exists. Skipping job."
+        exit 0
+      else
+        echo "Image does not exist. Proceeding with job."
+      fi
     - echo "$FHGHARBORPASS" | docker login -u $FHGHARBORUSER --password-stdin $FHGHARBORHOST
   script:
     # Use the Dockerfile located in $CI_PROJECT_DIR/docker/mmm-stack, build context should still be $CI_PROJECT_DIR
     - docker build -t stackimage --build-arg PKGVERSION=$PKGVERSION -f $CI_PROJECT_DIR/docker/mmm-stack/Dockerfile $CI_PROJECT_DIR/
-
 
     # Tag with pkgversion
     - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$PKGVERSION

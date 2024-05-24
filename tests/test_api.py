@@ -39,7 +39,7 @@ def api_client() -> TestClient:
     if TestClient is None:
         pytest.skip("Extra 'api' not available.")
     try:
-        from mmm.inference_api import build_app, APISettings
+        from mmm.inference_app import build_app, APISettings
 
         app = build_app(APISettings())
         return TestClient(app)

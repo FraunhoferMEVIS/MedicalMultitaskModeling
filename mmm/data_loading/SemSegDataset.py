@@ -47,7 +47,7 @@ class SemSegDataset(MTLDataset):
             classes=self.class_names,
             st_key=f"c{i}",
         )
-        st.write(case)
+        st.write({k: v for k, v in case.items() if k not in ["image", "label"]})
 
     def _compute_batchsize_from_batch(self, batch: Dict[str, Any]) -> int:
         return batch["image"].shape[0]

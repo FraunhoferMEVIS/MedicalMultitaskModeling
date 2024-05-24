@@ -227,98 +227,11 @@ class ResizeBoxes:
         return d
 
 
-class ExtractMaskedPatches:
-    """
-    Takes in a large image with a mask and outputs a list of subcases.
-
-    Forms a rectangular bounding box from foreground and extracts patches within this bounding box.
-    If you have very large masks where a bounding box would introduce a large false positive area,
-    consider using the GeoJSON utilities for region proposal and extract masks from that.
-
-    For color images channels last needs to be used.
-
-    Masks should not have a channel dimension:
-    - 2D: [width, height]
-    - 3D: [width, height, slices]
-
-    It exists because MONAI cannot deal well with colorimages.
-    """
-
-    def __init__(
-        self,
-        patch_size: Tuple[int, ...] = (224, 224),
-        image_key: str = "image",
-        label_key: str = "label",
-        out_image_key: str = "image",
-        out_label_key: str = "label",
-        max_coverage_foreground: float = 1.0,
-        channels_first: bool = True,
-        max_patches: Optional[int] = None,
-        patch_transform: Optional[Callable] = None,
-    ) -> None:
-        self.patch_size = patch_size
-        self.image_key, self.label_key = image_key, label_key
-        self.out_image_key, self.out_label_key = out_image_key, out_label_key
-        self.channels_first = channels_first
-        self.max_coverage_foreground = max_coverage_foreground
-        assert self.channels_first, "Currently, does only support channels_first images and masks without channel-dim."
-        self.max_patches = max_patches
-        self.patch_transform = patch_transform
-        logging.warning("Deprecated, use `MaskedPatchExtractor`")
-
-    def __call__(self, d: Dict) -> Any:
-        img: torch.Tensor = d[self.image_key]
-        mask: torch.Tensor = d[self.label_key]
-
-        patches = []
-        patch_masks = []
-        patch_coords = []
-
-        def gen_one_patch():
-            pos_with_roi = tuple([roi[1][i] - roi[0][i] for i in range(len(roi[0]))])
-            slices = get_random_patch(pos_with_roi, patch_size=self.patch_size)
-            slices_with_roi = [slice(s.start + roi[0][i], s.stop + roi[0][i]) for i, s in enumerate(slices)]
-            img_slices = [slice(img.shape[0])] + slices_with_roi if self.channels_first else slices_with_roi
-            return img[img_slices], mask[slices_with_roi], slices_with_roi
-
-        roi = generate_spatial_bounding_box(mask.unsqueeze(0), margin=[x // 2 for x in self.patch_size])
-        roi_area: int = reduce(lambda x, y: x * y, [roi[1][i] - roi[0][i] for i in range(len(roi[0]))])
-        patch_area = reduce(lambda x, y: x * y, self.patch_size)
-        for _ in range(roi_area // patch_area):
-            p_img, p_mask, p_coords = gen_one_patch()
-            if self.patch_transform is not None:
-                p_img, p_mask = self.patch_transform(p_img, p_mask)
-
-            patches.append(p_img)
-            patch_masks.append(p_mask)
-            patch_coords.append(p_coords)
-
-            if (self.max_patches is not None) and (len(patches) >= self.max_patches):
-                break
-
-        if not patch_coords:
-            d[self.out_image_key] = torch.Tensor()
-            d["meta"] = []
-            d[self.out_label_key] = torch.Tensor()
-        else:
-            d[self.out_image_key] = torch.stack(patches)
-            if "meta" not in d:
-                d["meta"] = [{} for _ in patch_coords]
-            else:
-                d["meta"] = [d["meta"].copy() for _ in patch_coords]
-            for i, patch_coord in enumerate(patch_coords):
-                d["meta"][i][f"{self.out_image_key}_subindex"] = i
-                d["meta"][i][f"{self.out_image_key}_subcoord"] = patch_coord
-            d[self.out_label_key] = torch.stack(patch_masks)
-
-        return d
-
-
 class MaskedPatchExtractor:
     """
     Takes in a large image with a mask and outputs a list of patches suitable for `CachingSubCaseDS`.
 
-    Masks should not have a channel dimension: [width, height]
+    Masks should not have a channel dimension: [H, W]
 
     It exists because MONAI cannot deal well with colorimages.
 
@@ -332,7 +245,7 @@ class MaskedPatchExtractor:
         patch_sizes: List[int] = [224]
         sizeaugmentation: float = Field(
             default=0.1,
-            description="Jiggle the width, height and coordinates of the patch by a maximum of this factor.",
+            description="Jiggle the H, W and coordinates of the patch by a maximum of this factor.",
         )
         max_patches: Optional[int] = None
 
@@ -363,14 +276,14 @@ class MaskedPatchExtractor:
 
         pseudo_levels = {i: patchsize / self.min_patch_size for i, patchsize in enumerate(self.args.patch_sizes)}
         g = self.regionextractor.iter_valid_windows(rect, pseudo_levels)
-        for i, (level, xy, wh) in enumerate(g):
-            wh_scaled = wh[0] * pseudo_levels[level], wh[1] * pseudo_levels[level]
-            patchmeta = {"level": level, "xy": xy, "wh": wh_scaled, "i": i}
+        for i, (level, xy, hw) in enumerate(g):
+            hw_scaled = hw[0] * pseudo_levels[level], hw[1] * pseudo_levels[level]
+            patchmeta = {"level": level, "xy": xy, "hw": hw_scaled, "i": i}
 
             x1 = max(0, int(xy[0]))
-            x2 = min(mask.shape[-2], int(xy[0] + wh_scaled[0]))
+            x2 = min(mask.shape[-2], int(xy[0] + hw_scaled[0]))
             y1 = max(0, int(xy[1]))
-            y2 = min(mask.shape[-1], int(xy[1] + wh_scaled[1]))
+            y2 = min(mask.shape[-1], int(xy[1] + hw_scaled[1]))
             res = {
                 "image": img[:, x1:x2, y1:y2],
                 self.mask_key: mask[..., x1:x2, y1:y2],
@@ -460,7 +373,7 @@ class UnifySizes:
     For example, if you think that you can fit a batch size of 96 224x224 images into your GPU memory,
     you can set max_pixels_in_batch to 96*224*224.
 
-    THIS WILL CHANGE THE ORDER INSIDE THE BATCH!
+    THIS WILL CHANGE THE ORDER INSIDE THE BATCH if not `enforce_order`!
     """
 
     def __init__(

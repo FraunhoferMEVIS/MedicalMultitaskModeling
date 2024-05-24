@@ -22,8 +22,6 @@ services:
     profiles: [ inference ]
     network_mode: "host"
     restart: unless-stopped
-    depends_on:
-      - labelstudio
     deploy:
       resources:
         reservations:
@@ -45,10 +43,9 @@ services:
       - MTLAPI_modules_path=${MTLAPI_modules_path}
       - MTLAPI_labelstudio_base=${MTLAPI_labelstudio_base:-http://localhost:9505}
       - ML_DATA_OUTPUT=${ML_DATA_OUTPUT:-/data/inference_cache}
-    # labels:
-    #   - traefik.http.routers.inference-api.rule=Host(`inference.datanodefec`)
 
   minios3:
+    profiles: [ storage, empaia ]
     # To enable using the data without authentication, use presigned URLs or
     # mc anonymous set download datanodefec/dataroot to make the bucket "dataroot" public
     # Direct path example: http:IP:PORT_TO_MINIOAPI=9502/BUCKETNAME/OBJECT/PATH.png
@@ -78,6 +75,7 @@ services:
   # Can be used as a metadata store for high-performance filesystems like JuiceFS
   # juicefs format --storage minio --bucket http://localhost:9502/juicedata  --access-key minioadmin --secret-key minioadmin "redis://localhost:9508/1" juicedata
   redis:
+    profiles: [ storage, empaia ]
     image: redis:7.2
     restart: unless-stopped
     ports:
@@ -88,6 +86,7 @@ services:
       - traefik.http.routers.redis.rule=Host(`redis.datanodefec`)
 
   labelstudio:
+    profiles: [ annotation ]
     image: heartexlabs/label-studio:1.9.2
     # Labelstudio needs to see other services not in the same compose network for webhooks
     network_mode: "host"
@@ -125,6 +124,7 @@ services:
       - traefik.http.routers.labelstudio.rule=Host(`labelstudio.datanodefec`)
 
   labelstudio-db:
+    profiles: [ annotation ]
     image: postgres:11.5
     restart: unless-stopped
     environment:
@@ -139,6 +139,7 @@ services:
       - 5436:5436
 
   wsi-service:
+    profiles: [ empaia ]
     # http://localhost:8081/v3/docs
     image: registry.gitlab.com/empaia/services/wsi-service:0.12.8
     # The WSI-service has a memory leak, so we need to restart it every now and then
@@ -161,6 +162,7 @@ services:
       - traefik.http.routers.wsi.rule=Host(`wsi.datanodefec`)
 
   storage-mapper:
+    profiles: [ empaia ]
     # http://localhost:8082/v3/docs
     image: registry.gitlab.com/empaia/services/storage-mapper-service:0.3.3
     ports:
@@ -178,6 +180,7 @@ services:
       - traefik.http.routers.storage-mapper.rule=Host(`storage-mapper.datanodefec`)
 
   storage-mapper-service-db:
+    profiles: [ empaia ]
     image: postgres:12
     restart: unless-stopped
     environment:

@@ -7,11 +7,8 @@ from typing import (
     Callable,
     List,
     Tuple,
-    TypeVar,
-    cast,
     Dict,
     Any,
-    Generic,
 )
 import os
 from zipfile import ZipFile
@@ -20,21 +17,17 @@ import requests
 from pathlib import Path
 
 from tqdm import tqdm
-from typing import List, Optional, Tuple, TypeVar, Dict, cast, Any
+from typing import List, Optional, Tuple, Dict, Any
 from pathlib import Path
 
 import torch
-from torch.utils.data import get_worker_info, Dataset, IterableDataset, Subset
+from torch.utils.data import get_worker_info, Dataset
 import collections
 import re
 import numpy as np
 
-from mmm.torch_ext import SubCaseType
-from mmm.BaseModel import BaseModel
-from .MTLDataset import MTLDataset, DatasetStyle
 from .DetectionDataset import DetectionDataset
 from .SemSegDataset import SemSegDataset
-from mmm.data_loading.TrainValCohort import TrainValCohort
 
 
 np_str_obj_array_pattern = re.compile(r"[SaUO]")
@@ -178,30 +171,6 @@ def download_and_extract_archive(
 
     print(f"Preparing data done")
     return target
-    # assert len(os.listdir(target)) == 2
-    # return [f for f in target.glob("*") if f.is_dir()][0] / src.relative_data_source
-
-
-# class DownloadArchiveDataset(ImageFolder):
-
-#     def __init__(self, data_root: Path, ds_src: ArchiveSource, *args, **kwargs) -> None:
-#         self.dataset_folder = data_root / ds_src.ds_name
-#         if not self.dataset_folder.exists():
-#             self.dataset_folder.mkdir()
-#         source_data_folder = download_and_extract_archive(self.dataset_folder, ds_src)
-#         super().__init__(source_data_folder, *args, **kwargs)
-
-# AntsVsBeesTrainSrc = ArchiveSource(
-#     ds_name="ants_vs_bees_train",
-#     ds_download_link="https://download.pytorch.org/tutorial/hymenoptera_data.zip",
-#     relative_data_source="train"
-# )
-
-# AntsVsBeesValSrc = ArchiveSource(
-#     ds_name="ants_vs_bees_train",
-#     ds_download_link="https://download.pytorch.org/tutorial/hymenoptera_data.zip",
-#     relative_data_source="val"
-# )
 
 
 class TransformedSubset(Dataset):

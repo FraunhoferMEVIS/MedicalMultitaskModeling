@@ -1,7 +1,6 @@
 from mmm.transforms import (
     RandomApply,
     KeepOnlyKeysInDict,
-    ExtractMaskedPatches,
     ExtractKeysAsTuple,
     TupleToDict,
     CopyKeysInDict,

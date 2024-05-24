@@ -13,6 +13,7 @@ from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
 from mmm.neural.modules.simple_cnn import MiniConvNet
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.mtl_modules.tasks.ClassificationTask import ClassificationTask
+from mmm.labelstudio_ext.NativeBlocks import NativeBlocks, MMM_MODELS
 
 try:
     import onnx
@@ -26,6 +27,17 @@ def torch_devices(request):
     if request.param == "cuda" and not torch.cuda.is_available():
         pytest.skip("cuda not available")
     return request.param
+
+
+@pytest.fixture(params=list(MMM_MODELS.keys()))
+def model_weights(request):
+    return request.param
+
+
+def test_loading_weights(model_weights, torch_devices):
+    native_blocks = NativeBlocks(MMM_MODELS[model_weights], device_identifier=torch_devices)
+    assert len(native_blocks.get_sharedblock_keys()) > 0
+    assert len(native_blocks.get_task_keys()) >= 0
 
 
 def test_onnx_export_encoder(tmp_path: Path, default_encoder_factory, torch_devices):
