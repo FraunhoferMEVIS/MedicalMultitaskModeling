@@ -1,6 +1,10 @@
 # MedicalMultitaskModeling
 
-The project enables training foundational medical imaging models using multi-task learning.
+The project enables training foundational medical imaging models using multi-task learning. 
+
+The software is provided on "AS IS" basis, i.e. it comes without any warranty, express or implied including (without limitations) any warranty of merchantability and warranty of fitness for a particular purpose.
+
+Please note that this software is licensed under the LICENSE FOR SCIENTIFIC NON-COMMERCIAL RESEARCH PURPOSES, see license.md.
 
 ## Installation:
 
