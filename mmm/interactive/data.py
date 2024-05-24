@@ -13,6 +13,7 @@ from mmm.data_loading.MultipleInstanceDataset import MultipleInstanceDataset
 from mmm.data_loading.ImageCaptionDataset import ImageCaptionDataset
 from mmm.data_loading.ssl import get_combined_SSL_dataset
 from mmm.data_loading.DiskDataset import DiskDataset
+from mmm.data_loading.DistributedPath import DistributedPath
 
 from mmm.data_loading.utils import (
     train_val_split,

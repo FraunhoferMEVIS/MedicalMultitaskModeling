@@ -11,24 +11,30 @@ Please note that this software is licensed under the LICENSE FOR SCIENTIFIC NON-
 To install the project and its dependencies, run the following command: 
 
 ```bash
-pip install medicalmultitaskmodeling
-# Including extra dependency groups "interactive" and "testing" recommended for development:
-pip install medicalmultitaskmodeling[interactive, testing]
 # The latest main branch from https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling
 pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git
 # A specific commit
 pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git@<commit-hash>
-```
-
-## Usage
-
-```bash
-# Start inference API on port 9504, then visit http://localhost:9504
-uvicorn api.api:app --port 9504 --host 0.0.0.0
-# Integrate into your own API via example code in mmm/inference_api.py
+# The latest release (coming soon)
+pip install medicalmultitaskmodeling
+# Including extra dependency groups "interactive" and "testing" recommended for development:
+pip install medicalmultitaskmodeling[interactive, testing]
 ```
 
 You can check the pyproject.toml file to see all available extras.
+
+## Usage
+
+```python
+# See our tutorial notebooks in the Quick Start Guide for more details.
+from mmm.labelstudio_ext.NativeBlocks import NativeBlocks, MMM_MODELS, DEFAULT_MODEL
+model = NativeBlocks(MMM_MODELS[DEFAULT_MODEL], device_identifier="cuda:0")
+
+import torch; import torch.nn as nn
+with torch.inference_mode():
+    feature_pyramid: list[torch.Tensor] = model["encoder"](torch.rand(1, 3, 224, 224).to(model.device))
+    hidden_vector = nn.Flatten(1)(model["squeezer"](feature_pyramid)[1])
+```
 
 ## Quickstart Guide
 
@@ -105,8 +111,12 @@ MMMVERSION=$(poetry version -s) && docker pull hub.cc-asp.fraunhofer.de/medicalm
 ## Start local infrastructure and inference API with Docker Compose
 
 ```bash
-# Start inference service in foreground
-MMMVERSION=$(poetry version -s) docker compose --profile inference up --build --remove-orphans -d
+# Profiles:
+# - inference runs MMM inference container
+# - storage runs network drive based on S3 and JuiceFS
+# - annotation runs Labelstudio annotation GUI
+# - empaia runs infrastructure for gigapixel imaging
+MMMVERSION=$(poetry version -s) docker compose --profile inference --profile storage --profile annotation --profile empaia up --build --remove-orphans -d
 ```
 
 ## Citation

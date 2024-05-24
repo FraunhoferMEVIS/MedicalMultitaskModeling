@@ -1,10 +1,18 @@
 from __future__ import annotations
+import logging
 import urllib
 import os
 from fsspec.core import OpenFile
 import fsspec
 from upath import UPath
 from pydantic import Field, BaseModel, model_validator
+
+import torch.multiprocessing as mp
+from torch.utils.data import get_worker_info
+
+# Gets the worker info for the parent process
+worker_info = get_worker_info()
+mp_method = mp.get_start_method()
 
 
 class DistributedPath(BaseModel):
@@ -46,13 +54,26 @@ class DistributedPath(BaseModel):
 
         return self
 
+    def fix_multiprocessing_with_fork(self):
+        global worker_info
+        if mp_method == "fork" and (new_worker_info := get_worker_info()) is not None:
+            # If the worker changed, some stuff will deadlock if not erased now:
+            if worker_info is None:
+                logging.info(f"MP {mp_method=}, erasing parent fsspec thread")
+                fsspec.asyn.iothread[0] = None
+                fsspec.asyn.loop[0] = None
+                worker_info = new_worker_info
+
     def file(self, *args, **kwargs) -> OpenFile:
+        self.fix_multiprocessing_with_fork()
         return fsspec.open(self.uri, *args, **kwargs, **self.options)
 
     def upath(self, *args, **kwargs) -> UPath:
+        self.fix_multiprocessing_with_fork()
         return UPath(self.uri, *args, **kwargs, **self.options)
 
     def fs(self):
+        self.fix_multiprocessing_with_fork()
         return fsspec.filesystem(self.get_protocol(self.uri), **self.options)
 
     def get_protocol(self, path):
@@ -64,3 +85,7 @@ class DistributedPath(BaseModel):
 
     def exists(self) -> bool:
         return self.fs().exists(self.uri)
+
+    def __truediv__(self, other):
+        new_uri = os.path.join(self.uri, other)
+        return DistributedPath(uri=new_uri, options=self.options)

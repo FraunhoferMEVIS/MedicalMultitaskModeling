@@ -7,6 +7,4 @@ WORKDIR /app
 COPY poetry.lock pyproject.toml README.md ./
 COPY mmm ./mmm
 
-COPY api ./api
-
-CMD uvicorn api.api:app --port 9504 --host 0.0.0.0
+CMD uvicorn mmm.api:app --port 9504 --host 0.0.0.0

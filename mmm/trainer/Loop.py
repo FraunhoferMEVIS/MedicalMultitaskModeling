@@ -73,6 +73,7 @@ class LoopLogConfig(BaseModel):
         default=True,
         description="If true, logs more detailed statistics after the loop",
     )
+    include_mem: bool = False
 
 
 class LoopConfig(BaseModel):
@@ -357,16 +358,14 @@ class Loop:
                             }
                         )
 
-                        step_log_dict[
-                            f"{step_prefix}memory/afterstep{task_uniqueness}"
-                        ] = torch.cuda.memory_allocated() / (1024**3)
-                        step_log_dict[f"{step_prefix}memory/beforestep{task_uniqueness}"] = before_mem / (1024**3)
-                        step_log_dict[f"{step_prefix}memory/beforeback{task_uniqueness}"] = before_backward_mem / (
-                            1024**3
-                        )
-                        step_log_dict[f"{step_prefix}memory/afterback{task_uniqueness}"] = after_backward_mem / (
-                            1024**3
-                        )
+                        if self.args.log_args.include_mem:
+                            mem_pref = f"{step_prefix}memory/"
+                            step_log_dict[f"{mem_pref}afterstep{task_uniqueness}"] = torch.cuda.memory_allocated() / (
+                                1024**3
+                            )
+                            step_log_dict[f"{mem_pref}beforestep{task_uniqueness}"] = before_mem / (1024**3)
+                            step_log_dict[f"{mem_pref}beforeback{task_uniqueness}"] = before_backward_mem / (1024**3)
+                            step_log_dict[f"{mem_pref}afterback{task_uniqueness}"] = after_backward_mem / (1024**3)
 
                         wandb.log(step_log_dict)
 

@@ -34,6 +34,7 @@ from mmm.event_selectors import (
     RecurringEventSelector,
 )
 from mmm.BaseModel import BaseModel
+from mmm.data_loading.DistributedPath import DistributedPath
 from mmm.optimization.MTLOptimizer import MTLOptimizer
 from mmm.trainer.Loop import TrainLoopConfig, ValLoopConfig
 
@@ -240,7 +241,7 @@ The parent folder where the trainer will store checkpoints.
         return export_module
 
     @torch.no_grad()
-    def save_blocks_native(self, filepath: Path, only_inference: bool = True):
+    def save_blocks_native(self, file_path: DistributedPath, only_inference: bool = True):
         """
         Wraps all shared blocks and tasks into a dictionary.
 
@@ -250,6 +251,8 @@ The parent folder where the trainer will store checkpoints.
         If the mmm code is slightly changed, the exported file will break.
         In that case, use the ONNX export.
         """
+        from mmm.labelstudio_ext.NativeBlocks import NativeBlocks
+
         exportdict = nn.ModuleDict(self.shared_blocks)
 
         for exporttask in self.mtl_tasks:
@@ -260,7 +263,7 @@ The parent folder where the trainer will store checkpoints.
             exportdict[exporttask.get_name()] = exporttask
         if only_inference:
             exportdict = exportdict.eval().cpu()
-        torch.save(exportdict, filepath)
+        NativeBlocks.save_to_disk(file_path, exportdict)
         return exportdict
 
     @torch.no_grad()
@@ -491,18 +494,27 @@ The parent folder where the trainer will store checkpoints.
         # for ddpmodel in self.ddp_model.values():
         #     ddpmodel.require_backward_grad_sync = on  # type: ignore
 
+    def fix_worker_num(self, for_split: DataSplit) -> bool:
+        allocated_workers = [
+            sum([t.cohort.get_active_workers(split) for t in self.mtl_tasks])
+            for split in [DataSplit.train, DataSplit.val]
+        ]
+        logging.info(f"{allocated_workers=} are already allocated for {for_split=}")
+        take_workers_from = DataSplit.train if for_split is DataSplit.val else DataSplit.val
+        if len(mp.active_children()) - allocated_workers[for_split.value] > len(os.sched_getaffinity(0)) // 2:
+            logging.warning(f"Killing workers {take_workers_from=} because too many workers would be allocated")
+            for t in self.mtl_tasks:
+                t.cohort.terminate_datasplit_workers(take_workers_from)
+            return True
+        return False
+
     def run_mtl_train_epoch(self) -> Dict[MTLTask, List[float]]:
         """
         A pretrain epoch's purpose is training the shared blocks.
 
         Multi-task pre-training is a typical example.
         """
-        allocated_train_workers = sum([t.cohort.get_active_workers(DataSplit.train) for t in self.mtl_tasks])
-        logging.info(f"{allocated_train_workers} are already allocated for training")
-        if len(mp.active_children()) - allocated_train_workers > len(os.sched_getaffinity(0)) // 2:
-            logging.info(f"Killing validation workers because too many workers would be allocated")
-            for t in self.mtl_tasks:
-                t.cohort.terminate_datasplit_workers(DataSplit.val)
+        self.fix_worker_num(for_split=DataSplit.train)
 
         # With distributed training this property of shared blocks is not autoforwarded to DDP wrapper
         self.ddp_model.train(True)
@@ -529,12 +541,7 @@ The parent folder where the trainer will store checkpoints.
 
     def run_mtl_val_epoch(self) -> Dict[MTLTask, List[float]]:
         """Validates the pre-training tasks"""
-        allocated_val_workers = sum([t.cohort.get_active_workers(DataSplit.val) for t in self.mtl_tasks])
-        logging.info(f"{allocated_val_workers} are already allocated for validation")
-        if len(mp.active_children()) - allocated_val_workers > len(os.sched_getaffinity(0)) // 2:
-            logging.info(f"Killing pretraining workers because too many workers would be allocated")
-            for t in self.mtl_tasks:
-                t.cohort.terminate_datasplit_workers(DataSplit.train)
+        self.fix_worker_num(for_split=DataSplit.val)
 
         self.ddp_model.train(False)
         loop: Loop = self.args.mtl_val_loop.build_instance(
@@ -697,10 +704,10 @@ The parent folder where the trainer will store checkpoints.
                 if val_result is not None and (
                     self.state.best_val_losses is None or sum(val_result) < sum(self.state.best_val_losses)
                 ):
-                    self.state.best_val_losses = val_result
+                    self.state.best_val_losses = val_result  # list of average losses per task [t1loss, t2loss, ...]
 
                     if not dist.is_initialized():
-                        self.create_checkpoint("bestbyvalidation")
+                        self.create_checkpoint(f"bestbyvalidationf{self.stages[self.state.stage_index]}")
 
             # Increment global epoch counter which is used for logging and is also checkpointed
 
