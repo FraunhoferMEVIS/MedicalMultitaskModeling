@@ -14,7 +14,7 @@ Fraunhofer is willing to grant institutions limited rights to use MedicalMultita
 »Object Code« is the intermediate result of a compiler or translation process of the Source Code of the Software and is not subject of this License.
 »Patent« Patent means the patent applied for in the name of Fraunhofer at the European Patent Office under the file number 23209015.9.
 »Source Code« means the code of the Software in the version of the programming language(s).
-»Software« means the computer program made available by Fraunhofer in the Gitlab repository under »https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling«.
+»Software« means the computer program made available by Fraunhofer in the Github repository under »https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling«.
  
 ## 2 License
 
