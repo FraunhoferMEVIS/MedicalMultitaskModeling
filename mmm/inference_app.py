@@ -16,7 +16,7 @@ except ImportError:
 from mmm.data_loading.DistributedPath import DistributedPath
 from mmm.labelstudio_ext.DLModel import DLModel
 from mmm.labelstudio_ext.LGBModel import LGBModel
-from mmm.labelstudio_ext.NativeBlocks import NativeBlocks
+from mmm.labelstudio_ext.NativeBlocks import NativeBlocks, MMM_MODELS, DEFAULT_MODEL
 from mmm.labelstudio_ext.LabelstudioCredentials import LabelstudioCredentials
 
 
@@ -24,10 +24,10 @@ class APISettings(BaseSettings):
     class Config:
         env_prefix = "MTLAPI_"
 
-    modules_path: DistributedPath = DistributedPath(uri="/jfs/output/mum_modules/mum_t46_48_2_e101.pt")
+    modules_path: DistributedPath | str = MMM_MODELS[DEFAULT_MODEL]
     labelstudio_base: str = "http://datanodefec:9505"
     labelstudio_token: str = "1234567890"
-    annotator_base: str = Field(
+    app_base: str = Field(
         "http://localhost:8000",
         description="The base URL of this service",
     )
@@ -59,7 +59,7 @@ def build_app(settings: APISettings) -> FastAPI:
     dlmodel = DLModel(
         settings.dlconfig,
         ls_client,
-        urljoin(settings.annotator_base, "/dl"),
+        urljoin(settings.app_base, "/dl"),
         nativeblocks,
     )
     app.include_router(dlmodel.build_router(), prefix="/dl")
@@ -67,7 +67,7 @@ def build_app(settings: APISettings) -> FastAPI:
     lgbmmodel = LGBModel(
         settings.lgbconfig,
         ls_client,
-        urljoin(settings.annotator_base, "/lgbm"),
+        urljoin(settings.app_base, "/lgbm"),
         nativeblocks,
     )
     app.include_router(lgbmmodel.build_router(), prefix="/lgbm")

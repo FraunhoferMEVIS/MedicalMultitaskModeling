@@ -31,7 +31,7 @@ services:
               capabilities: [ gpu ]
     build:
       context: .
-      dockerfile: api/Dockerfile
+      dockerfile: docker/mmm-app/Dockerfile
       args:
         - MMMVERSION=${MMMVERSION}
     ports:
@@ -40,8 +40,12 @@ services:
       - ${MTL_MODULES_DIR:-/data/}:/data
     environment:
       - MTL_MODULES_DIR=/data
+      # Configure the model to serve
       - MTLAPI_modules_path=${MTLAPI_modules_path}
+      # Configure the labelstudio base URL as visible to this app
       - MTLAPI_labelstudio_base=${MTLAPI_labelstudio_base:-http://localhost:9505}
+      # Configure URL of this app
+      - MTLAPI_app_base=${MTLAPI_app_base:-http://localhost:9504}
       - ML_DATA_OUTPUT=${ML_DATA_OUTPUT:-/data/inference_cache}
 
   minios3:

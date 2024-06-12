@@ -5,12 +5,12 @@
         "120"
     ],
     // Here, you can integrate your job configs
-    // "json.schemas": [
-    //     {
-    //         "fileMatch": [
-    //             "job_configs/experiment-name.jsonc"
-    //         ],
-    //         "url": ".vscode/experiment-name.schema.json"
-    //     }
-    // ]
+    "json.schemas": [
+        {
+            "fileMatch": [
+                "job_configs/quickstart.jsonc" // replace "quickstart" with your experiment's name
+            ],
+            "url": ".vscode/quickstart.schema.json" // replace "quickstart" with your experiment's name
+        }
+    ]
 }
