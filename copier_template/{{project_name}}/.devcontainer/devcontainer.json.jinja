@@ -1,6 +1,6 @@
 {
     "name": "Dev container for {{project_name}}",
-    "image": "hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-{{dev_image}}:1.0.2",
+    "image": "hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-{{dev_image}}:1.0.3",
     "runArgs": [
         {% if use_gpu %}
         "--gpus=all", // Will error if no GPU is available
@@ -8,7 +8,8 @@
         "--shm-size=8gb" // required for PyTorch multiprocessing
     ],
     "remoteEnv": {
-        "LOCAL_DEV_ENV": "True" // Our code's output behaves differently for jobs or development
+        "LOCAL_DEV_ENV": "True", // Our code's output behaves differently for jobs or development
+        // "MMM_LICENSE_ACCEPTED": "I ACCEPT" // If you have read and accept the MMM license, uncomment this line
     },
     // Comment out mounts that you do not need:
     "mounts": [

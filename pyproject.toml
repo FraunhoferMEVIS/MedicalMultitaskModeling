@@ -11,6 +11,9 @@ readme = "README.md"
 packages = [{ include = "mmm" }]
 include = [{ path = "**/*.jinja2", format = ["sdist", "wheel"] }]
 
+[tool.poetry.scripts]
+mmm = "mmm.app:app"
+
 [tool.poetry.dependencies]
 python = ">=3.10,<3.12"
 wandb = "^0.16.3"
@@ -66,11 +69,15 @@ pytest = { version = "^8.0.0", optional = true }
 pytest-cov = { version = "^4.0.0", optional = true }
 black = { version = "^23.1.0", optional = true }
 isort = { version = "^5.10.1", optional = true }
+sphinx = {version = "^7.3.7", optional = true}
+autodoc-pydantic = {version = "^2.2.0", optional = true}
 # Detection
 mmdet = { version = "^3.2.0", optional = true }
 mmcv = { url = "https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.0/mmcv-2.1.0-cp310-cp310-manylinux1_x86_64.whl", optional = true }
 nibabel = "^5.2.1"
 wsi-service = { version = "^0.12.14", source = "empaia", optional = true }
+typer = "^0.12.3"
+toml = "^0.10.2"
 
 [tool.poetry.group.deploy]
 optional = true
@@ -96,9 +103,10 @@ interactive = [
     "seaborn",
     "streamlit",
     "nbformat",
-    "nbconvert"
+    "nbconvert",
+    "black"
 ]
-testing = ["pytest", "pytest-cov", "black", "isort"]
+testing = ["pytest", "pytest-cov", "black", "isort", "sphinx", "autodoc-pydantic"]
 export = ["onnx", "onnxruntime"]
 
 [[tool.poetry.source]]

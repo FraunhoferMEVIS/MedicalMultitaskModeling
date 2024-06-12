@@ -17,6 +17,7 @@ cache:
   paths:
     - .venv
     - .cache/pip
+    - local_testing_cache/
 
 # Most jobs that need the version should depend on this job: e.g. by using `needs: [get-version]`
 # Here, we use the 1.0.0 version because it has poetry installed
@@ -43,6 +44,7 @@ test-no-extras:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   variables:
     ML_DATA_CACHE: ./local_testing_cache/
+    MMM_TEST_JOB: "no-extras"
   needs: [get-version, build-and-publish-stack-image]
   stage: test
   before_script:
@@ -59,6 +61,7 @@ test-extra-export:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   variables:
     ML_DATA_CACHE: ./local_testing_cache/
+    MMM_TEST_JOB: "extra-export"
   needs: [get-version, build-and-publish-stack-image]
   stage: test
   before_script:
@@ -70,6 +73,23 @@ test-extra-export:
     when: always
     reports:
       junit: report.xml
+
+test-building-docs:
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  stage: test
+  variables:
+    MMM_TEST_JOB: "building-docs"
+  tags:
+    - vangogh
+  needs: [get-version, build-and-publish-stack-image]
+  before_script:
+    - poetry config virtualenvs.in-project true
+    - poetry install -E testing -E api -E detection
+  script:
+    - bash ./rebuild-docs.sh
+  artifacts:
+    paths:
+      - docs/build
 
 test-extra-api:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
@@ -107,23 +127,18 @@ test-mtl-convergence:
     reports:
       junit: report_convergence.xml
 
-update-python-package:
-  only:
-    - main
+test-inference-notebook:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
-  stage: deploy
-  needs: [test-no-extras, test-mtl-convergence, test-extra-api, test-extra-export, get-version]
+  stage: test
+  variables:
+    ML_DATA_CACHE: ./local_testing_cache/
+    MMM_TEST_JOB: "inference-notebook"
+  needs: [get-version, build-and-publish-stack-image]
   before_script:
     - poetry config virtualenvs.in-project true
-    - poetry config repositories.gitlab ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
-    - poetry install --with deploy
+    - poetry install -E testing -E api -E detection -E interactive
   script:
-    - poetry run python3 -V
-    - poetry build
-    - poetry publish --repository gitlab --username gitlab-ci-token --password ${CI_JOB_TOKEN} --skip-existing
-  artifacts:
-    paths:
-      - mmm/dist/*.whl
+    - poetry run ipython -c "%run ./copier_template/{{{{project_name}}}}/inference.ipynb"
 
 # This requires to setup the Harbor integration in Gitlab settings
 build-and-publish-base-image:
@@ -184,3 +199,22 @@ build-and-publish-stack-image:
     # Tag with escaped branch name as well, e.g. feature/branch -> feature-branch
     - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:${CI_COMMIT_REF_NAME//\//-}
     - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:${CI_COMMIT_REF_NAME//\//-}
+
+update-python-package:
+  only:
+    - main
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  stage: deploy
+  # Required because otherwise the environment variables are not available
+  needs: [test-no-extras, test-mtl-convergence, test-extra-api, test-extra-export, get-version]
+  before_script:
+    - poetry config virtualenvs.in-project true
+    - poetry config repositories.gitlab ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
+    - poetry install --with deploy
+  script:
+    - poetry run python3 -V
+    - poetry build
+    - poetry publish --repository gitlab --username gitlab-ci-token --password ${CI_JOB_TOKEN} --skip-existing
+  artifacts:
+    paths:
+      - mmm/dist/*.whl

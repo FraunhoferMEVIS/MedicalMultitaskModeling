@@ -113,12 +113,14 @@ def unique_str_hash(*args, **kwargs):
     return argumenthasher.hexdigest()
 
 
-def get_default_cachepath(folder_name: str = "default", implicitly_create=False, based_on="ML_DATA_CACHE") -> Path:
-    assert based_on in os.environ, f"Set the cache_path manually or set it using the {based_on} env var"
-    cache_path = Path(os.getenv(based_on, default=f"./{folder_name}"))
+def get_default_cachepath(folder_name: str = "default", based_on="ML_DATA_CACHE") -> Path:
+    if based_on not in os.environ:
+        # "Set the cache_path manually or set it using the {based_on} env var"
+        cache_path = Path("~").expanduser() / ".mmm"
+    else:
+        cache_path = Path(os.getenv(based_on, default=f"./{folder_name}"))
     res = cache_path / folder_name
-    if implicitly_create and not res.exists():
-        res.mkdir(parents=True)
+    res.mkdir(parents=True, exist_ok=True)
     return res
 
 

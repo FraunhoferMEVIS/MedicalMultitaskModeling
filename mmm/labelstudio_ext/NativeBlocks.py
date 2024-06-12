@@ -12,7 +12,7 @@ from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.utils import get_default_cachepath
 
-MMM_MODELS = {"encoder-1.0.2.pt.zip": "https://owncloud.fraunhofer.de/index.php/s/ALN9l6RxjEbhPti/download"}
+MMM_MODELS = {"encoder-1.0.2.pt.zip": "https://owncloud.fraunhofer.de/index.php/s/aMfSaIoA5o2jYrG/download"}
 DEFAULT_MODEL = "encoder-1.0.2.pt.zip"
 
 
@@ -31,7 +31,7 @@ class NativeBlocks:
             if not model_name.endswith(".pt.zip"):
                 model_name = f"{model_name}.pt.zip"
             if not (target_path := cache_folder / model_name).exists():
-                target_path.parent.mkdir(parents=True, exist_ok=True)
+                logging.info(f"Model does not exist at {target_path}, downloading...")
                 torch.hub.download_url_to_file(modules_path.uri, target_path)
             else:
                 logging.info(f"Model already exists at {target_path}, not redownloading")
