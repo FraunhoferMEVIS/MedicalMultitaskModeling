@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -11,7 +11,8 @@ try:
 
     from label_studio_sdk import Client
 except ImportError:
-    FastAPI, CORSMiddleware, Client = Any, Any, Any
+    if not TYPE_CHECKING:
+        FastAPI, CORSMiddleware, Client = Any, Any, Any
 
 from mmm.data_loading.DistributedPath import DistributedPath
 from mmm.labelstudio_ext.DLModel import DLModel
@@ -55,6 +56,7 @@ def build_app(settings: APISettings) -> FastAPI:
     ls_client: Client = creds.build_client()
 
     nativeblocks = NativeBlocks(settings.modules_path, settings.device_identifier)
+    app.model = nativeblocks
 
     dlmodel = DLModel(
         settings.dlconfig,

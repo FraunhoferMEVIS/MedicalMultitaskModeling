@@ -1,4 +1,4 @@
-from mmm.data_loading.DistributedPath import DistributedPath
+import os
 import typer
 
 app = typer.Typer()
@@ -31,10 +31,11 @@ def inference_app(host: str = "0.0.0.0", port: int = 8000):
     typer.secho(
         f"Use environment variables to configure the app: {APISettings.Config.env_prefix}", fg=typer.colors.BRIGHT_BLUE
     )
-    typer.secho(
-        f"For example: `MTLAPI_modules_path=/path/to/model.pt.zip mmm inference-app` to use local model",
-        fg=typer.colors.BRIGHT_BLUE,
-    )
+    if "MTLAPI_modules_path" not in os.environ:
+        typer.secho(
+            f"For example: `MTLAPI_modules_path=/path/to/model.pt.zip mmm inference-app` to use local model",
+            fg=typer.colors.BRIGHT_BLUE,
+        )
     api_settings = APISettings()
     app = build_app(api_settings)
 

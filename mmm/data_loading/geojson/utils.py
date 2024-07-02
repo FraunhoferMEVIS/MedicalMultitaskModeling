@@ -127,8 +127,8 @@ def annotations_from_mask(
         shapes_for_val = shapes_from_binary_mask(
             (mask == val).astype(np.uint8), downsample_fac, coarse, min_area=min_area
         )
-        annos_for_val = [GeoAnno.from_shapely(shape) for shape in shapes_for_val]
-        for anno in annos_for_val:
-            anno.set_class_name(class_name)
+        annos_for_val = [
+            GeoAnno.from_shapely(shape, class_info=(class_name, len(for_values), val)) for shape in shapes_for_val
+        ]
         res.extend(annos_for_val)
     return res

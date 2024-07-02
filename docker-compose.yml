@@ -51,7 +51,7 @@ services:
   minios3:
     profiles: [ storage, empaia ]
     # To enable using the data without authentication, use presigned URLs or
-    # mc anonymous set download datanodefec/dataroot to make the bucket "dataroot" public
+    # mc anonymous set download ${NODE_VIRTUAL_NAME:-localhost}/dataroot to make the bucket "dataroot" public
     # Direct path example: http:IP:PORT_TO_MINIOAPI=9502/BUCKETNAME/OBJECT/PATH.png
     image: minio/minio:RELEASE.2023-10-16T04-13-43Z
     ports:
@@ -63,31 +63,34 @@ services:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
       # If a user accesses the api via the browser, redirect to the console
-      - MINIO_BROWSER_REDIRECT_URL=http://s3admin.datanodefec:9500
+      - MINIO_BROWSER_REDIRECT_URL=http://s3admin.${NODE_VIRTUAL_NAME:-localhost}:9500
     command: server /data --console-address ":9503"
     restart: unless-stopped
     labels:
-      # Requires that the host s3admin.datanodefec and s3.datanodefec are resolvable!
+      # Requires that the host s3admin.${NODE_VIRTUAL_NAME:-localhost} and s3.${NODE_VIRTUAL_NAME:-localhost} are resolvable!
       # Usually, this is done by adding two! entries to to /etc/hosts.
-      - traefik.http.routers.minio.rule=Host(`s3.datanodefec`)
+      - traefik.http.routers.minio.rule=Host(`s3.${NODE_VIRTUAL_NAME:-localhost}`)
       - traefik.http.routers.minio.service=minio
       - traefik.http.services.minio.loadbalancer.server.port=9000
       - traefik.http.routers.minio-console.service=minio-console
-      - traefik.http.routers.minio-console.rule=Host(`s3admin.datanodefec`)
+      - traefik.http.routers.minio-console.rule=Host(`s3admin.${NODE_VIRTUAL_NAME:-localhost}`)
       - traefik.http.services.minio-console.loadbalancer.server.port=9503
 
   # Can be used as a metadata store for high-performance filesystems like JuiceFS
-  # juicefs format --storage minio --bucket http://localhost:9502/juicedata  --access-key minioadmin --secret-key minioadmin "redis://localhost:9508/1" juicedata
+  # META_PASSWORD=$JFSPASSWORD && juicefs format --storage minio --bucket http://${S3HOSTNAME:-localhost}:9502/juicedata --access-key ${MINIO_ROOT_USER:-minioadmin} --secret-key ${MINIO_ROOT_PASSWORD:-minioadmin} "redis://${S3HOSTNAME:-localhost}:9508/1" juicedata
   redis:
     profiles: [ storage, empaia ]
     image: redis:7.2
     restart: unless-stopped
     ports:
       - 9508:6379
+    environment:
+      - REDIS_PASSWORD=${JFSPASSWORD:-defaultjfspassword}
     volumes:
       - ${DATAROOT:-/data/}/redis/:/data
     labels:
-      - traefik.http.routers.redis.rule=Host(`redis.datanodefec`)
+      - traefik.http.routers.redis.rule=Host(`redis.${NODE_VIRTUAL_NAME:-localhost}`)
+    command: /bin/sh -c "redis-server --requirepass '${JFSPASSWORD:-defaultjfspassword}'"
 
   labelstudio:
     profiles: [ annotation ]
@@ -125,7 +128,7 @@ services:
     # There is a permission error, run as root
     user: root
     labels:
-      - traefik.http.routers.labelstudio.rule=Host(`labelstudio.datanodefec`)
+      - traefik.http.routers.labelstudio.rule=Host(`labelstudio.${NODE_VIRTUAL_NAME:-localhost}`)
 
   labelstudio-db:
     profiles: [ annotation ]
@@ -163,7 +166,7 @@ services:
       # Set the root-path
       # - WS_ROOT_PATH=/wsi
     labels:
-      - traefik.http.routers.wsi.rule=Host(`wsi.datanodefec`)
+      - traefik.http.routers.wsi.rule=Host(`wsi.${NODE_VIRTUAL_NAME:-localhost}`)
 
   storage-mapper:
     profiles: [ empaia ]
@@ -181,7 +184,7 @@ services:
       - SM_DB_PORT=5432
     restart: unless-stopped
     labels:
-      - traefik.http.routers.storage-mapper.rule=Host(`storage-mapper.datanodefec`)
+      - traefik.http.routers.storage-mapper.rule=Host(`storage-mapper.${NODE_VIRTUAL_NAME:-localhost}`)
 
   storage-mapper-service-db:
     profiles: [ empaia ]

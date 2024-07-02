@@ -401,6 +401,7 @@ class MTLDataset(Dataset[SrcCaseType]):
             mp_iterator = self.get_mp_batchiterator(shuffle=shuffle)
             mp_iter, i = iter(mp_iterator), 0
             progbar = st.progress(value=0.0)
+            error_cases = []
             while True:
                 try:
                     batch = next(mp_iter)
@@ -411,8 +412,11 @@ class MTLDataset(Dataset[SrcCaseType]):
                     i += 1
                 except StopIteration:
                     st.balloons()
-                    return
+                    if error_cases:
+                        st.error(f"Found {[x[0] for x in error_cases]} invalid cases")
+                    return error_cases
                 except Exception as e:
+                    error_cases.append((i, e))
                     st.error(f"Could not load batch {i} due to {e}")
                     logging.error(f"Could not load batch {i} due to {e}")
                     stw(batch)
