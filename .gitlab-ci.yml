@@ -79,8 +79,6 @@ test-building-docs:
   stage: test
   variables:
     MMM_TEST_JOB: "building-docs"
-  tags:
-    - vangogh
   needs: [get-version, build-and-publish-stack-image]
   before_script:
     - poetry config virtualenvs.in-project true

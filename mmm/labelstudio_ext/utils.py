@@ -4,12 +4,12 @@ import logging
 import requests
 import datetime
 import uuid
-from typing import Optional, Any
+from typing import Optional, Any, TYPE_CHECKING
 import requests
 from urllib.parse import urlparse, urljoin
 import os
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageOps
 import imageio.v3 as imageio
 from pathlib import Path
 import tempfile
@@ -25,7 +25,8 @@ try:
         decode_from_annotation,
     )
 except ImportError:
-    Client, Project = Any, Any
+    if not TYPE_CHECKING:
+        Client, Project = Any, Any
 
 from mmm.typing_utils import get_colors
 from mmm.utils import remove_folder_blocking_if_exists
@@ -77,10 +78,6 @@ def sync_to_disk(
         )
     )
     (data_folder / "mtlfiledataset.json").write_text(json.dumps(project.get_params(), indent=2))
-
-
-def get_image_urls(n: int) -> list[str]:
-    return [f"https://picsum.photos/id/{i}/200/300" for i in range(1, n + 1)]
 
 
 def add_npimage_to_project(project: Project, img: np.ndarray, metainfo: Optional[dict] = None):
@@ -162,7 +159,6 @@ def binary_mask_to_result(mask: np.ndarray, class_name: str, brush_name: str, sc
         "id": str(uuid.uuid4())[0:8],
         "type": "brushlabels",
         "value": {"rle": rle, "format": "rle", "brushlabels": [class_name]},
-        "origin": "manual",
         "to_name": "image",
         "from_name": brush_name,
         "image_rotation": 0,
@@ -174,8 +170,12 @@ def binary_mask_to_result(mask: np.ndarray, class_name: str, brush_name: str, sc
     return res
 
 
-def mask_to_annotation(mask, class_names: list[str], brush_names: list[str], ignore_index: int | None = 0) -> list:
+def mask_to_annotation(
+    mask: np.ndarray, class_names: list[str], brush_names: list[str], ignore_index: int | None = 0
+) -> list:
     """
+    - mask: a numpy array with shape (H, W) containing the class indices
+
     project.create_annotation(
         task_id=project.tasks[-1]["id"],
         result=mask_to_annotation(mask, ["notannotated", "foreground"])
@@ -192,16 +192,18 @@ def download_image(url: str, attempts: int = 5, backoff: float = 1.0, ls_client=
     if url.startswith("data:image"):
         bytestring = url
         img_bytes = io.BytesIO(base64.b64decode(bytestring.split(",")[1]))
-        np_img: np.ndarray = imageio.imread(img_bytes)
+        # np_img: np.ndarray = imageio.imread(img_bytes)
     elif not bool(urlparse(url).netloc):
         # relative URL, use ls_client
         assert ls_client is not None, f"Relative URL {url} but no ls_client provided"
         r = ls_client.make_request("GET", url)
-        np_img: np.ndarray = imageio.imread(r.content)
+        img_bytes = io.BytesIO(r.content)
+        # np_img: np.ndarray = imageio.imread(r.content)
     else:
         try:
             # Otherwise, it should be a valid URL
-            np_img: np.ndarray = imageio.imread(url)
+            r = requests.get(url)
+            img_bytes = io.BytesIO(r.content)
         except Exception as e:
             logging.debug(f"Problem opening {url} as numpy image in attempt {attempts}: {e}")
             if attempts == 0:
@@ -212,17 +214,13 @@ def download_image(url: str, attempts: int = 5, backoff: float = 1.0, ls_client=
                 time.sleep(backoff)
                 return download_image(url, attempts - 1, backoff * 2)
 
+    pil_image = Image.open(img_bytes)
+    # Some images might have EXIF transformations
+    pil_image = ImageOps.exif_transpose(pil_image)
     if ensure_rgb:
-        if len(np_img.shape) == 2:
-            np_img = np.repeat(np_img[:, :, None], 3, axis=2)
-        elif np_img.shape[2] == 4:
-            np_img = np_img[:, :, :3]
-        elif np_img.shape[-1] == 1:
-            np_img = np.repeat(np_img, 3, axis=2)
-        else:
-            assert np_img.shape[2] == 3 and len(np_img.shape) == 3, f"Image shape {np_img.shape} not understood"
+        pil_image = pil_image.convert("RGB")
 
-    return np_img
+    return np.array(pil_image)
 
 
 def download_image_from_task(url: str, token: str, task: dict, image_name: str = "image") -> Image:

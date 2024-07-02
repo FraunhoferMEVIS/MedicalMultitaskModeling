@@ -11,6 +11,7 @@ import json
 
 import shapely
 from shapely.geometry import shape, Polygon
+from mmm.typing_utils import get_colors
 
 
 class AnnotationType(Enum):
@@ -69,7 +70,10 @@ class GeoAnno:
     """
 
     @classmethod
-    def from_shapely(cls, shape: shapely.Geometry) -> GeoAnno:
+    def from_shapely(cls, shape: shapely.Geometry, class_info: tuple[str, int, int] | None = None) -> GeoAnno:
+        """
+        class_info is given as (class_name, max_classes, class_index)
+        """
         json_dict = {
             "type": "Feature",
             "geometry": shapely.geometry.mapping(shape),
@@ -77,6 +81,12 @@ class GeoAnno:
                 "object_type": "annotation",
             },
         }
+        if class_info:
+            class_color = get_colors(class_info[1])[class_info[2]]  # between 0 and 1
+            json_dict["properties"]["classification"] = {
+                "name": class_info[0],
+                "color": [int(x * 255) for x in class_color],
+            }
         return cls(json_dict)
 
     @classmethod

@@ -33,7 +33,7 @@ class SemSegDataset(MTLDataset):
         # For example, MONAI tends to load some specific subclass of Tensor, exclude it!
         assert torch.is_tensor(d["label"]), "mask should be of type tensor"
         assert isinstance(d["label"], torch.LongTensor)
-        assert d["label"].shape == d["image"].shape[1:]
+        assert d["label"].shape == d["image"].shape[1:], f"{d['label'].shape=} should match {d['image'].shape[1:]=}"
         assert torch.max(d["label"]).item() < len(self.class_names), "There need to be more class names"
         assert len(d["image"].shape) == (len(d["label"].shape) + 1), "all labels should be in a one-dim tensor"
 

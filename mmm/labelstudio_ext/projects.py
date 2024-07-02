@@ -1,6 +1,6 @@
 import logging
 from pydantic import Field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from deepdiff import DeepDiff
 
 
@@ -9,7 +9,8 @@ from mmm.BaseModel import BaseModel
 try:
     from label_studio_sdk import Client, Project, parse_config
 except ImportError:
-    Client, Project = Any, Any
+    if not TYPE_CHECKING:
+        Client, Project = Any, Any
 
 
 class LSProject:
