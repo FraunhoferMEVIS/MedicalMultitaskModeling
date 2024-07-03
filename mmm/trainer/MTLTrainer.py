@@ -707,7 +707,7 @@ The parent folder where the trainer will store checkpoints.
                     self.state.best_val_losses = val_result  # list of average losses per task [t1loss, t2loss, ...]
 
                     if not dist.is_initialized():
-                        self.create_checkpoint(f"bestbyvalidationf{self.stages[self.state.stage_index]}")
+                        self.create_checkpoint(f"bestbyvalidation{self.stages[self.state.stage_index]}")
 
             # Increment global epoch counter which is used for logging and is also checkpointed
 
