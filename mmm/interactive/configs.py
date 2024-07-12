@@ -69,8 +69,6 @@ TrainValCohortConfig = TrainValCohort.Config
 # Training
 MTLOptimizerConfig = MTLOptimizer.Config
 
-# Neural
-from mmm.neural.pooling import GlobalPoolingConfig, GlobalPooling
 
 # Blocks
 MiniConvNetConfig = MiniConvNet.Config

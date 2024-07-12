@@ -16,7 +16,6 @@ from .MTLTask import MTLTask
 from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.data_loading.RegressionDataset import RegressionDataset
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
-from mmm.neural.pooling import GlobalPooling, GlobalPoolingConfig
 from mmm.neural import LossConfigs, MSELossConfig
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 

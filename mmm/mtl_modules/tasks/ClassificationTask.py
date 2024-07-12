@@ -26,7 +26,6 @@ from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper, make_grid_for_supercase
 from mmm.neural import LossConfigs, CrossEntropyLossConfig
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
-from mmm.neural.pooling import GlobalPooling, GlobalPoolingConfig
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 
 from mmm.utils import flatten_list_of_dicts

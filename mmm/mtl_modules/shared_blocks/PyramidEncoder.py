@@ -5,13 +5,9 @@ from typing_extensions import Annotated
 from pydantic import Field
 import torch
 import torch.nn as nn
-import logging
-import wandb
 
 from mmm.neural.model_protocols import EncoderModel
 from .SharedBlock import SharedBlock
-from mmm.neural.activations import ActivationFn, ActivationFunctionConfig
-from mmm.neural.pooling import GlobalPooling, GlobalPoolingConfig
 from mmm.neural.modules.simple_cnn import MiniConvNet
 from mmm.neural.modules.TorchVisionCNN import TorchVisionCNN
 from mmm.neural.modules.swinformer import TorchVisionSwinformer

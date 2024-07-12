@@ -41,7 +41,7 @@ def api_client() -> TestClient:
     try:
         from mmm.inference_app import build_app, APISettings
 
-        TESTING_MODULES_PATH = DistributedPath(uri="/jfs/output/mum_modules/mum_t46_48_2_e101.pt")
+        TESTING_MODULES_PATH = DistributedPath(uri="/jfs/output/mum_modules/mum_t46_48_2_e101_v1_0_4.pt.zip")
         app = build_app(APISettings(modules_path=TESTING_MODULES_PATH))
         return TestClient(app)
     except requests.exceptions.ConnectionError as e:
