@@ -18,13 +18,15 @@ from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 
 try:
-    from mmdet.registry import MODELS
     from mmdet.models.utils import multi_apply
-    from mmdet.models.dense_heads import FCOSHead, AnchorFreeHead
-    from mmengine.structures import InstanceData, BaseDataElement
+    from mmdet.models.dense_heads import FCOSHead
+    from mmengine.structures import InstanceData
     from mmengine.config import ConfigDict
 except ImportError:
-    logging.warning("Detection extra dependencies not installed")
+    logging.warning(
+        """Detection extra dependencies are not installed. Only required for Detection tasks and related components.
+Please install MMCV manually, as it is not available on PyPI."""
+    )
     FCOSHead = nn.Module
     InstanceData = Any
 
@@ -157,6 +159,10 @@ class MTLFCOSHead(FCOSHead):
 
 class MMDetectionTask(MTLTask):
     """
+    Requires to add mmcv and detection extra dependencies.
+    Depending on your environment, a statement like could be added to your pyproject.toml:
+    `mmcv = { url = "https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.0/mmcv-2.1.0-cp310-cp310-manylinux1_x86_64.whl" }`
+
     The confidence score of a box is influenced by the classification output and the centerness output.
     """
 

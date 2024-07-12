@@ -8,6 +8,9 @@ default:
   tags:
     - b0
 
+variables:
+  PYTHON_IMAGE: mcr.microsoft.com/vscode/devcontainers/python:3.10
+
 cache:
   key:
     files:
@@ -22,8 +25,12 @@ cache:
 # Most jobs that need the version should depend on this job: e.g. by using `needs: [get-version]`
 # Here, we use the 1.0.0 version because it has poetry installed
 get-version:
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-base:1.0.0
+  image: $PYTHON_IMAGE
   stage: prepare
+  tags:
+    - docker
+  before_script:
+    - pipx install poetry
   script:
     # Starting from Gitlab 13.9, this enables other jobs to access the variable
     - echo "PKGVERSION=$(poetry version -s)" >> deploy.env
@@ -33,6 +40,8 @@ get-version:
 
 # Run static analysis: black
 black:
+  tags:
+    - docker
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   stage: test
   needs: [get-version, build-and-publish-stack-image]
@@ -58,6 +67,8 @@ test-no-extras:
       junit: report.xml
 
 test-extra-export:
+  tags:
+    - docker
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   variables:
     ML_DATA_CACHE: ./local_testing_cache/
@@ -79,6 +90,8 @@ test-building-docs:
   stage: test
   variables:
     MMM_TEST_JOB: "building-docs"
+  tags:
+    - docker
   needs: [get-version, build-and-publish-stack-image]
   before_script:
     - poetry config virtualenvs.in-project true
@@ -207,6 +220,8 @@ update-python-package:
     - main
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   stage: deploy
+  tags:
+    - docker
   # Required because otherwise the environment variables are not available
   needs: [test-no-extras, test-mtl-convergence, test-extra-api, test-extra-export, get-version]
   before_script:
@@ -217,6 +232,53 @@ update-python-package:
     - poetry run python3 -V
     - poetry build
     - poetry publish --repository gitlab --username gitlab-ci-token --password ${CI_JOB_TOKEN} --skip-existing
-  artifacts:
-    paths:
-      - mmm/dist/*.whl
+
+test-mmm-installation:
+  only:
+    - main
+  needs: [get-version, update-python-package]
+  image: $PYTHON_IMAGE
+  variables:
+    MMM_LICENSE_ACCEPTED: "i accept"
+  stage: deploy
+  tags:
+    - docker
+  before_script:
+    - apt-get update && apt install python3-opencv -y
+  script:
+    # Install medicalmultitaskmodeling from the Gitlab registry
+    - pip install MedicalMultitaskModeling==$PKGVERSION --index-url https://gitlab-ci-token:${CI_JOB_TOKEN}@$(echo ${CI_API_V4_URL} | sed 's|https://||')/projects/${CI_PROJECT_ID}/packages/pypi/simple
+    - python -c "from mmm.interactive import *"
+
+update-python-package-public:
+  when: manual
+  only:
+    - release
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  stage: deploy
+  tags:
+    - docker
+  needs: [test-no-extras, test-mtl-convergence, test-extra-api, test-extra-export, get-version]
+  before_script:
+    - poetry config virtualenvs.in-project true
+    - poetry install --with deploy
+  script:
+    - poetry run python3 -V
+    - poetry build
+    - poetry publish --username __token__ --password ${PYPI_TOKEN}
+
+test-mmm-installation-public:
+  only:
+    - release
+  needs: [get-version, update-python-package-public]
+  image: $PYTHON_IMAGE
+  variables:
+    MMM_LICENSE_ACCEPTED: "i accept"
+  stage: deploy
+  tags:
+    - docker
+  before_script:
+    - apt-get update && apt install python3-opencv -y
+  script:
+    - pip install MedicalMultitaskModeling==$PKGVERSION
+    - python -c "from mmm.interactive import *"

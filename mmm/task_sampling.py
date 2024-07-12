@@ -8,7 +8,7 @@ Further, a single task might reference multiple cohorts in the future.
 from __future__ import annotations
 
 import itertools
-from typing import Optional, List, Any, Tuple, Generator, Sized, cast, Dict
+from typing import List, Any, Tuple, Generator, Dict
 import random
 import logging
 from abc import ABC, abstractmethod

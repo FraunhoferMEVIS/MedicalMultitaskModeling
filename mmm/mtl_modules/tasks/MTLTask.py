@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pydantic import Field
-from typing import Any, List, Dict, Tuple, Optional, Mapping
+from typing import Any, List, Dict, Tuple, Optional
 from abc import abstractmethod
 
 import torch
@@ -13,7 +13,6 @@ from ..MTLModule import MTLModule
 from mmm.mtl_modules.MTLModule import MTLModule
 from mmm.event_selectors import EventSelector, RecurringEventSelector
 from mmm.logging.type_ext import StepFeedbackDict, StepMetricDict
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 
 
