@@ -11,14 +11,18 @@ Please note that this software is licensed under the LICENSE FOR SCIENTIFIC NON-
 To install the project and its dependencies, run the following command: 
 
 ```bash
+pip install medicalmultitaskmodeling
+# Including extra dependency groups "interactive" and "testing" recommended for development:
+pip install medicalmultitaskmodeling[interactive, testing]
 # The latest main branch from https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling
 pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git
 # A specific commit
 pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git@<commit-hash>
-# The latest release (coming soon)
-pip install medicalmultitaskmodeling
-# Including extra dependency groups "interactive" and "testing" recommended for development:
-pip install medicalmultitaskmodeling[interactive, testing]
+
+# Verify system dependencies
+import cv2; import torch; assert torch.cuda.is_available()
+# Verify MMM
+from mmm.interactive import *
 ```
 
 You can check the pyproject.toml file to see all available extras.

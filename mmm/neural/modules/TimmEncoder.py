@@ -2,7 +2,7 @@ from typing import List, Literal
 from pydantic import Field
 import torch
 import timm
-from timm.models.layers.norm import LayerNorm2d
+from timm.layers.norm import LayerNorm2d
 import torch.nn as nn
 
 from mmm.torch_ext import replace_childen_recursive
