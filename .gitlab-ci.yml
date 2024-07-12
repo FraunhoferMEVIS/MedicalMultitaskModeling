@@ -142,6 +142,8 @@ test-inference-notebook:
 build-and-publish-base-image:
   timeout: 3h 30m
   stage: build
+  tags:
+    - docker-socket
   services:
     - docker:20.10.22-dind
   image: docker:20.10.22
@@ -171,6 +173,8 @@ build-and-publish-base-image:
 build-and-publish-stack-image:
   timeout: 3h 30m
   stage: build
+  tags:
+    - docker-socket
   needs: [get-version, build-and-publish-base-image]
   services:
     - docker:20.10.22-dind

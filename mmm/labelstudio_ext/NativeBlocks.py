@@ -12,8 +12,8 @@ from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.utils import get_default_cachepath
 
-MMM_MODELS = {"encoder-1.0.3.pt.zip": "https://owncloud.fraunhofer.de/index.php/s/lIS1DlZ0BFPhFAb/download"}
-DEFAULT_MODEL = "encoder-1.0.3.pt.zip"
+MMM_MODELS = {"encoder-1.0.4.pt.zip": "https://owncloud.fraunhofer.de/index.php/s/Q5o1uD5eHL7tr3X/download"}
+DEFAULT_MODEL = "encoder-1.0.4.pt.zip"
 
 
 class NativeBlocks:

@@ -129,7 +129,6 @@ SchedulerType = Union[
     DecaySchedulerConfig,
     CosineAnnealingLRSchedulerConfig,
 ]
-SchedulerList = List[SchedulerType]
 
 
 class OptimizerConfig(BaseModel):

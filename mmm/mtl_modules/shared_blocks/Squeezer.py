@@ -1,4 +1,4 @@
-from typing import Mapping, Tuple
+from typing import Mapping, Tuple, Annotated, Union
 from pydantic import Field
 
 import torch
@@ -6,6 +6,9 @@ import torch.nn as nn
 
 from mmm.mtl_modules.shared_blocks.SharedBlock import ModelInput, SharedBlock
 from mmm.neural.activations import ActivationFn, ActivationFunctionConfig
+from mmm.neural.pooling import AttentionPoolingConfig, GlobalPoolingConfig, GlobalPooling
+
+PoolingConfigs = Union[AttentionPoolingConfig, GlobalPoolingConfig]
 
 
 class Squeezer(SharedBlock):
@@ -22,7 +25,11 @@ class Squeezer(SharedBlock):
             """,
         )
         activation: ActivationFunctionConfig = ActivationFunctionConfig(fn_type=ActivationFn.GeLU)
-        use_channel_attention: bool = False
+        pooling: Annotated[PoolingConfigs, Field()] = GlobalPoolingConfig(pooling_type=GlobalPooling.AveragePooling)
+        connect_latent_and_feature: bool = Field(
+            default=False,
+            description="EXPERIMENTAL! If true, adds the pooled and processed vector onto the feature tensor",
+        )
 
     def __init__(self, args: Config, enc_out_channels: list[int], enc_strides: list[int]):
         super().__init__(args)
@@ -30,7 +37,6 @@ class Squeezer(SharedBlock):
         self.enc_out_channels = enc_out_channels
         self.enc_strides = enc_strides
 
-        # self.norm = nn.GroupNorm(num_groups=1, num_channels=self.get_hidden_dim())
         # Use batchnorm because it will be automatically converted into the correct type of norm
         self.norm = nn.BatchNorm2d(num_features=self.get_hidden_dim())
         self.conv = (
@@ -45,9 +51,9 @@ class Squeezer(SharedBlock):
             else nn.Identity()
         )
         self.activation = args.activation.build_instance()
-        self.avg = nn.AdaptiveAvgPool2d((1, 1))
-        if self.args.use_channel_attention:
-            self.m = nn.AdaptiveMaxPool2d((1, 1))
+
+        self.pool = self.args.pooling.build_instance(self.enc_out_channels[-1], self.get_hidden_dim())
+
         self.make_mtl_compatible()
 
     def get_hidden_dim(self) -> int:
@@ -55,16 +61,15 @@ class Squeezer(SharedBlock):
 
     def forward(self, feature_pyramid: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         # The order is inspired by torchvision.ops.misc.ConvNormActivation
-        # experimental setting to increase the influence between pyramidal and pooling tasks
-        if self.args.use_channel_attention:
-            atten = self.avg(feature_pyramid[-1]) + self.m(feature_pyramid[-1])
-            feat_latent = self.norm(self.conv(atten))
-            feat = self.norm(self.conv(feature_pyramid[-1]))
-            return self.activation(feat + feat_latent), self.activation(feat_latent)
-        else:
-            return self.activation(self.norm(self.conv(feature_pyramid[-1]))), self.activation(
-                self.norm(self.conv(self.avg(feature_pyramid[-1])))
-            )
+        pooled = self.activation(self.norm(self.conv(self.pool(feature_pyramid[-1]))))
+
+        lowest_lvl = self.activation(self.norm(self.conv(feature_pyramid[-1])))
+
+        # experimental
+        if self.args.connect_latent_and_feature:
+            lowest_lvl = lowest_lvl + pooled
+
+        return lowest_lvl, pooled
 
     def get_example_input(self) -> ModelInput | Tuple[ModelInput, ...]:
         return [torch.rand(1, self.enc_out_channels[-1], 7, 7).to(self.torch_device)]

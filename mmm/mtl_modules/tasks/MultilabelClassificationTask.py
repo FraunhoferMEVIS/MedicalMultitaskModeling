@@ -20,7 +20,6 @@ from mmm.data_loading.MultilabelClassificationDataset import (
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 from mmm.logging.wandb_ext import remove_wandb_special_chars
-from mmm.neural.pooling import GlobalPooling, GlobalPoolingConfig
 
 from mmm.utils import flatten_list_of_dicts
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
