@@ -14,10 +14,6 @@ To install the project and its dependencies, run the following command:
 pip install medicalmultitaskmodeling
 # Including extra dependency groups "interactive" and "testing" recommended for development:
 pip install medicalmultitaskmodeling[interactive, testing]
-# The latest main branch from https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling
-pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git
-# A specific commit
-pip install git+https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling.git@<commit-hash>
 
 # Verify system dependencies
 import cv2; import torch; assert torch.cuda.is_available()
@@ -29,6 +25,8 @@ You can check the pyproject.toml file to see all available extras.
 
 ## Usage
 
+For **pure inference** based on the pre-trained model (downloads automatically):
+
 ```python
 # See our tutorial notebooks in the Quick Start Guide for more details.
 from mmm.labelstudio_ext.NativeBlocks import NativeBlocks, MMM_MODELS, DEFAULT_MODEL
@@ -39,6 +37,8 @@ with torch.inference_mode():
     feature_pyramid: list[torch.Tensor] = model["encoder"](torch.rand(1, 3, 224, 224).to(model.device))
     hidden_vector = nn.Flatten(1)(model["squeezer"](feature_pyramid)[1])
 ```
+
+For a quick start in **model training** or more advanced inference examples, see the "Quickstart Guide" below.
 
 ## Quickstart Guide
 
