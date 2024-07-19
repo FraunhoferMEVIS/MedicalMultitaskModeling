@@ -92,6 +92,21 @@ If that is not possible, setup GPU support, check with `nvidia-smi` and run:
 sudo apt install python3-opencv -y
 ```
 
+## Citation
+
+If you use this project, please cite [our work](https://doi.org/10.1038/s43588-024-00662-z):
+
+```
+@article{SchaeferOvercoming2024,
+    title = {Overcoming data scarcity in biomedical imaging with a foundational multi-task model},
+    journal = {Nature Computational Science},
+    issn = {2662-8457},
+    doi = {10.1038/s43588-024-00662-z},
+    author = {Schäfer, Raphael and Nicke, Till and Höfener, Henning and Lange, Annkristin and Merhof, Dorit and Feuerhake, Friedrich and Schulz, Volkmar and Lotz, Johannes and Kiessling, Fabian},
+    year = {2024},
+}
+```
+
 ## Development
 
 1. Start poetry environment `poetry init`
@@ -121,21 +136,6 @@ MMMVERSION=$(poetry version -s) && docker pull hub.cc-asp.fraunhofer.de/medicalm
 # - annotation runs Labelstudio annotation GUI
 # - empaia runs infrastructure for gigapixel imaging
 MMMVERSION=$(poetry version -s) docker compose --profile inference --profile storage --profile annotation --profile empaia up --build --remove-orphans -d
-```
-
-## Citation
-
-If you use this project, please cite [our work](https://doi.org/10.48550/arXiv.2311.09847):
-
-```
-@misc{schäfer2023overcoming,
-      title={Overcoming Data Scarcity in Biomedical Imaging with a Foundational Multi-Task Model}, 
-      author={Raphael Schäfer and Till Nicke and Henning Höfener and Annkristin Lange and Dorit Merhof and Friedrich Feuerhake and Volkmar Schulz and Johannes Lotz and Fabian Kiessling},
-      year={2023},
-      eprint={2311.09847},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
-}
 ```
 
 # Repository Structure
