@@ -40,6 +40,10 @@ with torch.inference_mode():
     hidden_vector = nn.Flatten(1)(model["squeezer"](feature_pyramid)[1])
 ```
 
+For a quick start in **model training**, see the "Quickstart Guide" below. 
+
+For **pure inference** based on the pre-trained model (downloads automatically), see `copier_template/{{project_name}}/inference.ipynb`.
+
 ## Quickstart Guide
 
 To begin training multi-task models, you can use our `quickstart.ipynb` getting started notebook.
