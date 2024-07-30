@@ -164,3 +164,72 @@ class SMPDiceFocalLoss2D:
         # Dice loss is 0 for perfect prediction, 1 for worst possible prediction
         d_loss = self.crit2(preds, mask)
         return {"focal": f_loss, "dice": d_loss}
+
+
+class SurvivalLossConfig(TorchModule):
+    loss_type: Literal["nll_surv", "cox_reg"] = "cox_reg"
+    # How much the still alive examples count
+    alpha: float = 0.2
+
+    def build_instance(self) -> nn.Module:
+        if self.loss_type == "nll_surv":
+            return NLLSurvLoss(self.alpha)
+        else:
+            return CoxSurvivalLoss(self.alpha)
+
+
+class CoxSurvivalLoss(nn.Module):
+    def __init__(self, alpha: float) -> None:
+        super().__init__()
+        self.alpha: float = alpha
+        self.eps: float = 1e-8
+        self.continuous: bool = True
+
+    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, censor: torch.Tensor):
+        """
+        Implements the loss function from DeepSurv
+        y_pred: time prediction of event [B,n]. Should estimate the log-risk function of the Cox PH model
+        y_true: actual time of event [B,n]
+        censor: if example is censored or not [B,n]
+        """
+
+        log_loss = torch.exp(y_pred)
+        log_loss = torch.sum(log_loss, dim=0)
+        log_loss = torch.log(log_loss).reshape(-1, 1)
+        neg_log_loss = -torch.sum((y_pred - log_loss) * censor) / torch.sum(censor)
+        return neg_log_loss
+
+
+class NLLSurvLoss(nn.Module):
+    def __init__(self, alpha: float) -> None:
+        super().__init__()
+        self.alpha: float = alpha
+        self.eps: float = 1e-8
+        self.continuous: bool = False
+
+    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, censor: torch.Tensor):
+        """
+        expects dicts with keys: censorship, surv, where hazard = nn.Sigmoid(surv_bin)
+        the shapes of the tensors behind the keys should be:
+        censorship: [B,1] where 1 means uncensored (event occours) and 0 means censored (no event)
+        y_pred: [B,n_bins] Logits of bins predicted
+        y_true: [B,1] true bin
+        """
+        # # calculate estimated hazards
+        hazards = torch.sigmoid(y_pred)
+
+        # # survival is a cumulative product of 1-hazard
+        survival = torch.cumprod(1 - hazards, dim=1)
+
+        # # S(-1) = 0, all patients are alive from (-inf, 0) by definition
+        survival_padded = torch.cat([torch.ones_like(censor).view(-1, 1), survival], 1)
+
+        survival_before_event = torch.gather(survival_padded, dim=1, index=y_true.view(-1, 1)).clamp(min=self.eps)
+        hazard_at_event = torch.gather(hazards, dim=1, index=y_true.view(-1, 1)).clamp(min=self.eps)
+        survival_at_event = torch.gather(survival_padded, dim=1, index=(y_true + 1).view(-1, 1)).clamp(min=self.eps)
+
+        uncensored_loss = -censor * ((torch.log(survival_before_event) + torch.log(hazard_at_event)))
+        censored_loss = -(1 - censor) * torch.log(survival_at_event)
+
+        loss = (uncensored_loss + censored_loss) + (self.alpha * uncensored_loss)
+        return loss.sum()

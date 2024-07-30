@@ -8,13 +8,10 @@ from .losses import (
     FocalLossConfig,
     FocalLoss,
     NLLLossConfig,
+    SurvivalLossConfig,
 )
 from .activations import ActivationFunctionConfig, ActivationFn
 
 LossConfigs = Union[
-    CrossEntropyLossConfig,
-    MSELossConfig,
-    RMSELossConfig,
-    FocalLossConfig,
-    NLLLossConfig,
+    CrossEntropyLossConfig, MSELossConfig, RMSELossConfig, FocalLossConfig, NLLLossConfig, SurvivalLossConfig
 ]

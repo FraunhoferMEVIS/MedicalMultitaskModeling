@@ -5,3 +5,4 @@ from mmm.mtl_modules.tasks.RegressionTask import RegressionTask
 from mmm.mtl_modules.tasks.mmDetectionTask import MMDetectionTask
 from mmm.mtl_modules.tasks.MultilabelClassificationTask import MultilabelClassificationTask
 from mmm.mtl_modules.tasks.ImageGenerationTask import ImageGenerationTask
+from mmm.mtl_modules.tasks.SurvivalPredictionTask import SurvivalPredictionTask

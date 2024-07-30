@@ -40,6 +40,7 @@ minio = "^7.1.17"
 # Extras for fsspec: https://github.com/fsspec/filesystem_spec/blob/master/pyproject.toml
 fsspec = { version = "^2024.3.1", extras = ["s3"] }
 universal-pathlib = "^0.2.2"
+lifelines = "^0.29.0"
 
 # Optional dependencies which are used in extra groups, maintained by hand
 # By design of Poetry, these cannot be specified using optional dependency groups!
