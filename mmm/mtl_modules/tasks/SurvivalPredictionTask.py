@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, List, Dict, Tuple
+from typing import Any, List, Dict, Tuple, Union
 from typing_extensions import Annotated
 import random
 import logging
@@ -18,6 +18,7 @@ from mmm.logging.wandb_ext import build_wandb_image
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.data_loading.ClassificationDataset import ClassificationDataset
+from mmm.data_loading.RegressionDataset import RegressionDataset
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 from mmm.neural.losses import SurvivalLossConfig
@@ -26,6 +27,8 @@ from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 
 from mmm.utils import flatten_list_of_dicts
+
+SurvivalDatasets = Union[RegressionDataset, ClassificationDataset]
 
 
 class SurvivalPredictionTask(MTLTask):
@@ -51,7 +54,7 @@ class SurvivalPredictionTask(MTLTask):
         squeezer_key: str = "squeezer"
         grouper_key: str = "grouper"
         loss_fn: Annotated[LossConfigs, Field(discriminator="loss_type")] = SurvivalLossConfig(
-            loss_type="cox_reg", alpha=0.4
+            loss_type="cox_reg", alpha=0.2
         )
         dropout: float = 0.375
         max_visualizations_per_full_train_loop: int = 3
@@ -60,7 +63,9 @@ class SurvivalPredictionTask(MTLTask):
         self,
         hidden_dim: int,
         args: Config,
-        cohort: TrainValCohort[ClassificationDataset],
+        cohort: TrainValCohort[
+            SurvivalDatasets
+        ],  # accepts Regression or Classification Datasets. Depending on the loss
     ):
         super().__init__(args, cohort)
         self.args: SurvivalPredictionTask.Config  # Make sure IDE knows about the task specific fields
@@ -87,8 +92,10 @@ class SurvivalPredictionTask(MTLTask):
 
     def prepare_batch(self, batch: Dict[str, Any]) -> Any:
         batch["image"] = batch["image"].to(self.torch_device)
+        # part of a classification Dataset
         if "class" in batch:
             batch["class"] = batch["class"].to(self.torch_device)
+        # part of a regression Dataset
         if "target" in batch:
             batch["target"] = batch["target"].to(self.torch_device)
         assert all(
@@ -113,7 +120,10 @@ class SurvivalPredictionTask(MTLTask):
 
     def training_step(self, batch: Dict[str, Any], shared_blocks: SharedModules):
         x = batch["image"]  # bag of images
-        y = batch["target"]  # bins of survival
+        if "target" in batch:
+            y = batch["target"]  # time of survival
+        else:
+            y = batch["class"]  # bins of survival
 
         # skip if batch is empty
         tensornums = [bool(t.numel()) for t in x]
@@ -140,28 +150,19 @@ class SurvivalPredictionTask(MTLTask):
 
         y_hat = shared_blocks.forward((x, supercase_indices), self.forward)
 
+        # either predict hazard directly or calculate it
         if self.criterion.continuous:
-            step_results: StepMetricDict = {
-                "preds": y_hat.detach().cpu().numpy(),
-                "targets": y.cpu().numpy(),
-                "censor": censor.cpu().numpy(),
-                "logits": y_hat.detach().cpu().numpy(),
-                "hazard": y_hat.detach().cpu().numpy(),
-            }
+            hazards = y_hat
         else:
             hazards = torch.sigmoid(y_hat.view(-1, len(self.class_names)).cpu().detach())
-            S = torch.cumprod(1 - hazards, dim=1)
-            S_padded = torch.cat([torch.ones_like(censor.view(-1, 1)), S], 1)
 
-            step_results: StepMetricDict = {  # type: ignore (.numpy() does not correctly indicate numpy array)
-                "targets": y.cpu().numpy(),
-                "logits": y_hat.detach().cpu().numpy(),
-                "preds": torch.argmax(hazards.detach().cpu(), dim=1).numpy(),
-                "hazard": hazards.detach().cpu().numpy(),
-                "survival": S.detach().cpu().numpy(),
-                "padded_hazards": S_padded.detach().cpu().numpy(),
-                "censor": censor.flatten().cpu().numpy(),
-            }
+        step_results: StepMetricDict = {  # type: ignore (.numpy() does not correctly indicate numpy array)
+            "targets": y.cpu().numpy(),
+            "logits": y_hat.detach().cpu().numpy(),
+            "preds": torch.argmax(hazards.detach().cpu(), dim=1).numpy(),
+            "hazard": hazards.detach().cpu().numpy(),
+            "censor": censor.flatten().cpu().numpy(),
+        }
         if sum(censor) > 1 and self.criterion.continuous:
             batch_loss = self.criterion(
                 y_pred=y_hat, y_true=y.view(-1, 1), censor=censor.view(-1, 1).to(self.torch_device)

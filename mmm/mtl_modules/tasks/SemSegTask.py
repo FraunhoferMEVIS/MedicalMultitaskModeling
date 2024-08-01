@@ -308,12 +308,7 @@ class SemSegTask(MTLTask):
             mask.detach(),
             y_hat.detach(),
         )
-        # y_hat_detached = torch.argmax(y_hat_detached.sigmoid(), dim=1)
-        # y_hat_preds = self.probas_to_preds(
-        #     out_probas=self.logits_to_probas(y_hat_detached),
-        #     confidence_threshold=self.args.confidence_threshold if mtl_settings.ignore_class_value is not None else None,
-        #     uncertainty_class=mtl_settings.ignore_class_value,
-        # )
+
         y_hat_probas = self.logits_to_probas(y_hat_detached)
         y_hat_preds = self.probas_to_preds(out_probas=y_hat_probas)
         step_metrics = self._collect_stats_for_metrics(

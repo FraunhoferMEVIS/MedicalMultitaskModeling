@@ -1,3 +1,4 @@
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,6 +9,45 @@ from torchvision.utils import make_grid
 from typing import Literal
 
 from .SharedBlock import SharedBlock
+from mmm.torch_ext import CachingSubCaseDS, CachingSubCaseDSSampler
+from mmm.BaseModel import BaseModel
+
+
+class GroupSampler(CachingSubCaseDSSampler):
+    class Config(BaseModel):
+        sampler_per_group: tuple[int, int] = (20, 50)
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        super().__init__()
+        self.samples_left_for_group = 0
+        self.current_group = None
+
+    def hook_new_subcases(self, subcases: list):
+        """
+        Each subcase has a "group_id" in the "meta" dictionary.
+        This functions returns the group_ids of the subcases
+        """
+        self.group_map: dict = {}  # maps group id to list of subcase indices
+        for i, subcase in enumerate(self.cacheds.subcases + subcases):
+            if "group_id" in subcase["meta"]:
+                group_id = subcase["meta"]["group_id"]
+            else:
+                group_id = subcase["meta"]["supermeta"]["group_id"]
+            if group_id not in self.group_map:
+                self.group_map[group_id] = []
+            self.group_map[group_id].append(i)
+        return subcases
+
+    def sample_from_cache(self, draining_phase: bool) -> int:
+        # After removal all indices are invalid, recreate the group map
+        self.hook_new_subcases([])
+        if self.current_group not in self.group_map or self.samples_left_for_group <= 0:
+            self.current_group = random.choice(list(self.group_map.keys()))
+            self.samples_left_for_group = random.randint(*self.cfg.sampler_per_group)
+        self.samples_left_for_group -= 1
+        subcase_index = random.choice(self.group_map[self.current_group])
+        return subcase_index
 
 
 def make_grid_for_supercase(training_ims, supercase_indices, group_index, grouper_weights):
@@ -107,6 +147,9 @@ class WeightedAvgPoolReducer(nn.Module):
         x = x * weights
         return self.average_group_pool(x, supercase_indices), weights
 
+    def rate_instance_relevance(self, x, supercase_indices):
+        return F.sigmoid(self.weightgiver(x))
+
 
 class Grouper(SharedBlock):
     class Config(SharedBlock.Config):
@@ -129,6 +172,9 @@ class Grouper(SharedBlock):
             raise NotImplementedError
             "The selected grouper is not implemented"
         self.make_mtl_compatible()
+
+    def rate_instance_relevance(self, x, supercase_indices):
+        return self.reducer.rate_instance_relevance(x, supercase_indices)
 
     @staticmethod
     def extract_ids_from_batch(ids: list[str]):

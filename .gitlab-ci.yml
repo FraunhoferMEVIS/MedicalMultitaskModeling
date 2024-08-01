@@ -9,6 +9,7 @@ default:
     - b0
 
 variables:
+  # To ensure that external users can use MMM, we test the install with another public image
   PYTHON_IMAGE: mcr.microsoft.com/vscode/devcontainers/python:3.10
 
 cache:
@@ -37,6 +38,16 @@ get-version:
   artifacts:
     reports:
       dotenv: deploy.env
+
+ensure-changelog-updated:
+  image: $PYTHON_IMAGE
+  stage: prepare
+  needs: [get-version]
+  tags:
+    - docker
+  script:
+    # Assert that the string "## $PKGVERSION" is present in the CHANGELOG.md file
+    - grep -q "## $PKGVERSION" CHANGELOG.md
 
 # Run static analysis: black
 black:

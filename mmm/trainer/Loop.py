@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import json
-from enum import Enum
 from abc import abstractmethod
 from typing import (
     Any,

@@ -173,6 +173,58 @@ SuperCaseType = TypeVar("SuperCaseType")
 SubCaseType = TypeVar("SubCaseType")
 
 
+class CachingSubCaseDSSampler:
+    def __init__(self):
+        # Once this sampler is assigned to a CachingSubCaseDS, it will set this attribute
+        # In consequence, one sampler can only be used for one CachingSubCaseDS
+        self.cacheds: CachingSubCaseDS = None
+
+    def prepare_supercase_indices(self, supercase_indices: list[int], worker_id: int | None) -> list[int]:
+        """
+        By default, the supercases are shuffled
+        """
+        random.shuffle(supercase_indices)
+        return supercase_indices
+
+    def decide_removal(self, popped_case: SubCaseType, draining_phase: bool) -> bool:
+        """
+        By default, a case is removed whenever it is yielded
+        """
+        return True
+
+    def sample_from_cache(self, draining_phase: bool) -> int:
+        """
+        By default, a random case is sampled from the cache
+        """
+        return random.randint(0, len(self.cacheds.subcases) - 1)
+
+    def hook_new_subcases(self, subcases: list[SubCaseType]):
+        """
+        If the sampler keeps track of the subcases, it can update its internal state here.
+
+        It also needs to return the subcases that should be added to the cache.
+        """
+        return subcases
+
+    def postprocess_subcase(self, subcase: SubCaseType) -> SubCaseType:
+        """
+        If the sampler changes the expected type of the subcase, here is the place to change it back.
+        """
+        return subcase
+
+
+class DeterministicSampler(CachingSubCaseDSSampler):
+    """
+    This disables randomization of the data.
+    """
+
+    def prepare_supercase_indices(self, idxs: list[int], worker_id) -> list[int]:
+        return idxs
+
+    def sample_from_cache(self, draining_phase: bool) -> int:
+        return 0  # Always use the first case
+
+
 class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
     """
     Holds `cache_size` subcases in a cache for each worker.
@@ -195,7 +247,7 @@ class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
         supercase_ds: Dataset[SuperCaseType],
         supercase_loader: Callable[[SuperCaseType], List[SubCaseType]],
         cfg: Config,
-        removal_decider: Optional[Callable[[CachingSubCaseDS, SubCaseType, bool], bool]] = None,
+        cache_sampler: CachingSubCaseDSSampler | None = None,
     ) -> None:
         self.supercase_ds, self.cfg, self.supercase_loader = (
             supercase_ds,
@@ -204,26 +256,23 @@ class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
         )
         self.subcases = []
 
-        if removal_decider is None:
-            self.removal_decider: Callable[
-                [CachingSubCaseDS, SubCaseType, bool], bool
-            ] = self.default_sampler  # type: ignore
+        if cache_sampler is None:
+            self.cache_sampler: CachingSubCaseDSSampler = CachingSubCaseDSSampler()
         else:
-            self.removal_decider: Callable[[CachingSubCaseDS, SubCaseType, bool], bool] = removal_decider
+            self.cache_sampler: CachingSubCaseDSSampler = cache_sampler
+        assert self.cache_sampler.cacheds is None, "The sampler is already assigned to a CachingSubCaseDS"
+        self.cache_sampler.cacheds = self
 
-    @staticmethod
-    # For verbosity, do not use the Python-implicit behaviour of making the current instance the first argument.
-    def default_sampler(cacheds: CachingSubCaseDS, popped_case: SubCaseType, draining_phase: bool) -> bool:
-        """
-        By default, a case is removed whenever it is yielded
-        """
-        return True
-
-    def _process_index(self, index: int, draining_phase: bool):
+    def _yield_sample(self, draining_phase: bool):
+        # index = random.randint(0, len(self.subcases) - 1)
+        index = self.cache_sampler.sample_from_cache(draining_phase)
         subcase = self.subcases[index]
-        if self.removal_decider(self, subcase, draining_phase):
+        if self.cache_sampler.decide_removal(subcase, draining_phase):
             self.subcases.pop(index)
-        return subcase
+        return self.cache_sampler.postprocess_subcase(subcase)
+
+    def add_subcases(self, subcases: List[SubCaseType]):
+        self.subcases.extend(self.cache_sampler.hook_new_subcases(subcases))
 
     def __iter__(self) -> Iterator[SubCaseType]:
         worker_info = get_worker_info()
@@ -250,26 +299,29 @@ class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
             if not supercase_indices:
                 logging.warn(f"Worker {worker_info} had no supercases in {self}")
                 return
-        random.shuffle(supercase_indices)
+        self.cache_sampler.prepare_supercase_indices(supercase_indices, worker_id if worker_info is not None else None)
         filling_phase = True
 
-        for supercase_index in supercase_indices:
-            supercase = self.supercase_ds[supercase_index]
-            self.subcases.extend(self.supercase_loader(supercase))
-            if len(self.subcases) > self.cfg.subcase_cache_size:
-                filling_phase = False
+        while filling_phase:
+            for supercase_index in supercase_indices:
+                supercase = self.supercase_ds[supercase_index]
+                self.add_subcases(self.supercase_loader(supercase))
+                if len(self.subcases) > self.cfg.subcase_cache_size:
+                    filling_phase = False
 
-            if not filling_phase:
-                # Only yield samples if the cache is pretty full to increase diversity
-                while len(self.subcases) > (self.cfg.subcase_cache_size // num_workers):
-                    yield self._process_index(random.randint(0, len(self.subcases) - 1), draining_phase=False)
+                if not filling_phase:
+                    # Only yield samples if the cache is pretty full to increase diversity
+                    while len(self.subcases) > (self.cfg.subcase_cache_size // num_workers):
+                        yield self._yield_sample(draining_phase=False)
+            if filling_phase:
+                logging.warning(f"Dataset {self=} smaller than cache size {self.cfg.subcase_cache_size}")
 
         if self.cfg.drain_each_epoch:
             # No more supercases to load, yield the remaining cases:
             # We might also skip this to keep the cache full to reduce the next epoch's startup time
             random.shuffle(self.subcases)
             while self.subcases:
-                yield self._process_index(0, draining_phase=True)
+                yield self._yield_sample(draining_phase=True)
 
 
 class SubCaseDataset(Dataset, Generic[SubCaseType]):

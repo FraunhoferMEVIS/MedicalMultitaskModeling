@@ -5,3 +5,4 @@ docs/build/
 docs/source/auto
 **/*.pyc
 **/*.ipynb_checkpoints
+**/node_modules
