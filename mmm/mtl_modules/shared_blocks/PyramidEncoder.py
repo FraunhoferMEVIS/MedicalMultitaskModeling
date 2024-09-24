@@ -9,12 +9,14 @@ import torch.nn as nn
 from mmm.neural.model_protocols import EncoderModel
 from .SharedBlock import SharedBlock
 from mmm.neural.modules.simple_cnn import MiniConvNet
+from mmm.neural.modules.simple_linear import SimpleLinearNet
 from mmm.neural.modules.TorchVisionCNN import TorchVisionCNN
 from mmm.neural.modules.swinformer import TorchVisionSwinformer
 from mmm.neural.modules.TimmEncoder import TimmEncoder
 
 EncoderArchitectureType = Union[
     MiniConvNet.Config,
+    SimpleLinearNet.Config,
     TorchVisionCNN.Config,
     TorchVisionSwinformer.Config,
     TimmEncoder.Config,

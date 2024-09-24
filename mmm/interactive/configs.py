@@ -50,6 +50,7 @@ from mmm.neural.modules.TorchVisionCNN import TorchVisionCNN
 
 from mmm.neural.modules.swinformer import TorchVisionSwinformer
 from mmm.neural.modules.simple_cnn import MiniConvNet
+from mmm.neural.modules.simple_linear import SimpleLinearNet
 from mmm.neural.modules.convnext import TorchVisionConvnext
 from mmm.neural.modules.TimmEncoder import TimmEncoder
 from mmm.neural.activations import ActivationFunctionConfig, ActivationFn
@@ -72,6 +73,7 @@ MTLOptimizerConfig = MTLOptimizer.Config
 
 # Blocks
 MiniConvNetConfig = MiniConvNet.Config
+SimpleLinearNetConfig = SimpleLinearNet.Config
 TorchVisionSwinformerConfig = TorchVisionSwinformer.Config
 FCOSDecoderConfig = FCOSDecoder.Config
 AEDecoderConfig = MTLDecoder.Config
