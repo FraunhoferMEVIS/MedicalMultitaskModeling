@@ -1,7 +1,5 @@
-from enum import Enum
 from pydantic import Field
 import random
-from functools import reduce
 import numpy as np
 import torch
 import logging
@@ -9,10 +7,7 @@ from typing import Any, Callable, List, Tuple, Dict, Optional, Set, Iterable
 
 import torchvision.transforms.functional as F
 import torchvision.transforms as transforms
-from torchvision.transforms import InterpolationMode
 from torchvision.models.detection.transform import resize_boxes
-from monai.data.utils import get_random_patch
-from monai.transforms.utils import generate_spatial_bounding_box
 import albumentations as A
 
 from mmm.BaseModel import BaseModel
@@ -317,7 +312,7 @@ def _case_to_aformat(
     return aimg, amask, amasks, aboxes, alabels
 
 
-def _atransform_into_case(transformed: Dict[str, Any]) -> Dict[str, Any]:
+def _atransform_into_case(transformed: dict[str, Any]) -> dict[str, Any]:
     res = {"image": F.to_tensor(transformed["image"])}  # torch.from_numpy(transformed['image']).permute(2, 0, 1),
     if "bboxes" in transformed:
         res["boxes"] = torch.Tensor(transformed["bboxes"])
@@ -325,11 +320,15 @@ def _atransform_into_case(transformed: Dict[str, Any]) -> Dict[str, Any]:
     if "mask" in transformed:
         res["label"] = torch.from_numpy(transformed["mask"]).long()
     if "masks" in transformed:
-        res["masks"] = torch.from_numpy(transformed["masks"][0]).permute(2, 0, 1).long()
+        res["masks"] = torch.from_numpy(transformed["masks"][0].copy()).permute(2, 0, 1).long()
     return res
 
 
 class Alb:
+    """
+    We use pascal_voc format for boxes. Augmentation might change the number of boxes and labels.
+    """
+
     def __init__(self, transforms: TransformsSeqType, support_boxes=False) -> None:
         box_kwargs = (
             {"bbox_params": A.BboxParams(format="pascal_voc", label_fields=["class_labels"])} if support_boxes else {}
@@ -391,6 +390,15 @@ class UnifySizes:
 
     @staticmethod
     def resize_case(d: Dict[str, Any], new_width: int, new_height: int, support_boxes: bool = False) -> Dict[str, Any]:
+        if "meta" not in d:
+            d["meta"] = {}
+
+        # assert "original_image_size" not in d["meta"], "original_image_size already exists in meta"
+        if "original_image_size" not in d["meta"]:
+            # If the image instance is already in a format suitable for Albumentations, the channel dim is first
+            d["meta"]["original_image_size"] = d["image"].shape[1:]
+        d["meta"]["image_size_before_resize_case"] = d["image"].shape[1:]
+
         return Alb(transforms=[A.Resize(new_height, new_width)], support_boxes=support_boxes)(d)
 
     @staticmethod

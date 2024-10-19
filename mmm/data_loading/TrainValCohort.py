@@ -2,7 +2,7 @@ from __future__ import annotations
 import warnings
 from tqdm.auto import tqdm
 import numpy as np
-from pydantic import Field
+from pydantic import Field, model_validator
 from typing import Optional, Literal, Iterable
 from mmm.BaseModel import BaseModel
 from typing import Optional, Tuple, Dict, Any, Generic, TypeVar, Callable
@@ -29,7 +29,7 @@ class TrainValCohort(Generic[DatasetType]):
     """
 
     class Config(BaseModel):
-        batch_size: tuple[int | None, int | None] = Field(default=(None, 1))
+        batch_size: tuple[int | None, int | None] | int = Field(default=(None, 1))
         shuffle_loaders: tuple[bool, bool] = (True, True)
         num_workers: int = Field(
             default=1,
@@ -43,6 +43,13 @@ while keeping a minimum of one worker per task.
         )
         pin_memory: bool = False
         prefill_cache: bool = True
+
+        @model_validator(mode="before")
+        @classmethod
+        def batchsize_to_tuple(cls, data):
+            if isinstance(data, int):
+                data = (data, data)
+            return data
 
     def __init__(
         self,

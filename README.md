@@ -112,7 +112,6 @@ If you use this project, please cite [our work](https://doi.org/10.1038/s43588-0
 1. Start poetry environment `poetry init`
 1. Add the package as a git submodule `git submodule add <repository-url>`
 1. Add the package, including interactive and dependencies for adding the tests: `poetry add ./medicalmultitaskmodeling/ --editable -E interactive -E testing`
-1. For practical examples on how to get started with development, refer to one of our projects, such as [UMedPT](https://github.com/FraunhoferMEVIS/UMedPT).
 
 ## Docker images
 

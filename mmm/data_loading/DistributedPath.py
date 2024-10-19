@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+from typing import Type
 import urllib
 import os
 from fsspec.core import OpenFile
@@ -35,11 +36,18 @@ class DistributedPath(BaseModel):
     uri: str = Field(..., description="FSSpec URI to the file")
     options: dict = Field({}, description="Options to pass to fsspec")
 
+    @classmethod
+    def from_string(cls: Type[DistributedPath], uri: str):
+        return cls(uri=uri)
+
     @model_validator(mode="before")
     @classmethod
-    def serialize_from_string(cls, data):
+    def pre_validator(cls, data):
         if isinstance(data, str):
-            data = DistributedPath(uri=data).model_dump()
+            data = DistributedPath.from_string(data).model_dump()
+
+        elif isinstance(data, UPath):
+            data = DistributedPath(uri=data.as_uri(), options=data.storage_options).model_dump()
 
         return data
 
@@ -59,10 +67,18 @@ class DistributedPath(BaseModel):
         if mp_method == "fork" and (new_worker_info := get_worker_info()) is not None:
             # If the worker changed, some stuff will deadlock if not erased now:
             if worker_info is None:
-                logging.info(f"MP {mp_method=}, erasing parent fsspec thread")
+                logging.debug(f"MP {mp_method=}, erasing parent fsspec thread")
                 fsspec.asyn.iothread[0] = None
                 fsspec.asyn.loop[0] = None
                 worker_info = new_worker_info
+
+    @property
+    def parent(self) -> DistributedPath:
+        parent_upath = self.upath().parent
+        return DistributedPath(uri=parent_upath.as_uri(), options=parent_upath.storage_options)
+
+    def read_text(self, *args, **kwargs) -> str:
+        return self.upath().read_text(*args, **kwargs)
 
     def file(self, *args, **kwargs) -> OpenFile:
         self.fix_multiprocessing_with_fork()
@@ -87,5 +103,8 @@ class DistributedPath(BaseModel):
         return self.fs().exists(self.uri)
 
     def __truediv__(self, other):
-        new_uri = os.path.join(self.uri, other)
+        if isinstance(other, DistributedPath):
+            new_uri = os.path.join(self.uri, other.uri)
+        else:
+            new_uri = os.path.join(self.uri, other)
         return DistributedPath(uri=new_uri, options=self.options)

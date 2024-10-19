@@ -10,7 +10,11 @@ import torch
 import torch.nn as nn
 from torchvision.utils import make_grid
 from pydantic import Field
-from lifelines.utils import concordance_index
+
+try:
+    from lifelines.utils import concordance_index
+except ImportError:
+    concordance_index = None
 
 from mmm.logging.type_ext import StepMetricDict
 from mmm.logging.wandb_ext import build_wandb_image

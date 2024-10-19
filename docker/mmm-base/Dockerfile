@@ -23,6 +23,7 @@ RUN apt-get update -qq \
     sudo \
     git \
     nomad \
+    pipx \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /usr/bin/python3 /usr/bin/python \
@@ -67,5 +68,4 @@ RUN echo "source /usr/share/bash-completion/completions/git" >> ~/.bashrc
 RUN poetry config virtualenvs.create false
 
 # S3 tools
-RUN curl -sSL https://github.com/kahing/goofys/releases/latest/download/goofys -o /root/.local/bin/goofys && chmod +x /root/.local/bin/goofys
 RUN curl -sSL https://d.juicefs.com/install | sh -
