@@ -3,6 +3,7 @@ Utilities that extend the PyTorch types, not relying on our MTL extensions such 
 """
 
 from __future__ import annotations
+from copy import deepcopy
 import os
 import logging
 import random
@@ -186,7 +187,7 @@ class CachingSubCaseDSSampler:
         random.shuffle(supercase_indices)
         return supercase_indices
 
-    def decide_removal(self, popped_case: SubCaseType, draining_phase: bool) -> bool:
+    def decide_removal(self, popped_case: SubCaseType, draining_phase: bool, index) -> bool:
         """
         By default, a case is removed whenever it is yielded
         """
@@ -267,8 +268,10 @@ class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
         # index = random.randint(0, len(self.subcases) - 1)
         index = self.cache_sampler.sample_from_cache(draining_phase)
         subcase = self.subcases[index]
-        if self.cache_sampler.decide_removal(subcase, draining_phase):
+        if self.cache_sampler.decide_removal(subcase, draining_phase, index):
             self.subcases.pop(index)
+        else:
+            subcase = deepcopy(subcase)  # Prevent consumers from modifying the original
         return self.cache_sampler.postprocess_subcase(subcase)
 
     def add_subcases(self, subcases: List[SubCaseType]):
@@ -299,7 +302,9 @@ class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
             if not supercase_indices:
                 logging.warn(f"Worker {worker_info} had no supercases in {self}")
                 return
-        self.cache_sampler.prepare_supercase_indices(supercase_indices, worker_id if worker_info is not None else None)
+        self.cache_sampler.prepare_supercase_indices(
+            supercase_indices, worker_info.id if worker_info is not None else None
+        )
         filling_phase = True
 
         while filling_phase:

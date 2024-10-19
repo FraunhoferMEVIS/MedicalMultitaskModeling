@@ -1,25 +1,29 @@
+from typing import TYPE_CHECKING
 import pytest
 import numpy as np
 import torch
 from pathlib import Path
-from mmm.data_loading.ClassificationDataset import ClassificationDataset
-from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
 
-from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
-from mmm.trainer.MTLTrainer import MTLTrainer
 from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
-from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
-from mmm.neural.modules.simple_cnn import MiniConvNet
-from mmm.mtl_modules.tasks.MTLTask import MTLTask
-from mmm.mtl_modules.tasks.ClassificationTask import ClassificationTask
 from mmm.labelstudio_ext.NativeBlocks import NativeBlocks, MMM_MODELS
 
 try:
     import onnx
     import onnxruntime as ort
 except ImportError:
-    pass
+    if TYPE_CHECKING:
+        onnx, ort = None, None
+
+
+@pytest.fixture
+def skip_if_export_not_installed() -> bool:
+    try:
+        import onnx
+
+        return True
+    except ImportError:
+        pytest.skip("onnx not available")
 
 
 @pytest.fixture(params=["cpu", "cuda"])
@@ -40,7 +44,7 @@ def test_loading_weights(model_weights, torch_devices):
     assert len(native_blocks.get_task_keys()) >= 0
 
 
-def test_onnx_export_encoder(tmp_path: Path, default_encoder_factory, torch_devices):
+def test_onnx_export_encoder(tmp_path: Path, default_encoder_factory, torch_devices, skip_if_export_not_installed):
     GPU_GPU_DECIMALS, CPU_GPU_DECIMALS = 3, 2
 
     enc: PyramidEncoder = default_encoder_factory().set_device(torch_devices)

@@ -7,4 +7,6 @@ WORKDIR /app
 COPY poetry.lock pyproject.toml README.md ./
 COPY mmm ./mmm
 
-CMD uvicorn mmm.api:app --port 9504 --host 0.0.0.0
+RUN poetry install -E all
+
+CMD mmm inference-app --port 9504
