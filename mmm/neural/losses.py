@@ -3,6 +3,7 @@ from typing import Any, Literal, Tuple
 from typing_extensions import Unpack
 from pydantic import Field
 from pydantic.config import ConfigDict
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -88,7 +89,8 @@ class MSELoss(nn.Module):
         self.factor = 1.0 / (range_max - range_min)
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor):
-        return self.mse_loss(inputs * self.factor, targets * self.factor)
+        # return self.mse_loss(inputs * self.factor, targets * self.factor)
+        return torch.mean(torch.square(targets - inputs))
 
 
 class RMSELoss(nn.Module):
@@ -167,13 +169,17 @@ class SMPDiceFocalLoss2D:
 
 
 class SurvivalLossConfig(TorchModule):
-    loss_type: Literal["nll_surv", "cox_reg"] = "cox_reg"
+    loss_type: Literal["nll_surv", "cox_reg", "bce_surv", "nnet_surv"] = "cox_reg"
     # How much the still alive examples count
     alpha: float = 0.2
 
     def build_instance(self) -> nn.Module:
         if self.loss_type == "nll_surv":
             return NLLSurvLoss(self.alpha)
+        elif self.loss_type == "bce_surv":
+            return BCESurvivalLoss(self.alpha)
+        elif self.loss_type == "nnet_surv":
+            return NnetSurvivalLoss(self.alpha)
         else:
             return CoxSurvivalLoss(self.alpha)
 
@@ -185,18 +191,18 @@ class CoxSurvivalLoss(nn.Module):
         self.eps: float = 1e-8
         self.continuous: bool = True
 
-    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, censor: torch.Tensor):
+    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, event: torch.Tensor):
         """
         Implements the loss function from DeepSurv
         y_pred: time prediction of event [B,n]. Should estimate the log-risk function of the Cox PH model
         y_true: actual time of event [B,n]
-        censor: if example is censored or not [B,n]
+        event: if example is censored or not [B,n]
         """
 
         log_loss = torch.exp(y_pred)
         log_loss = torch.sum(log_loss, dim=0)
         log_loss = torch.log(log_loss).reshape(-1, 1)
-        neg_log_loss = -torch.sum((y_pred - log_loss) * censor) / torch.sum(censor)
+        neg_log_loss = -torch.sum((y_pred - log_loss) * event) / torch.sum(event)
         return neg_log_loss
 
 
@@ -207,7 +213,7 @@ class NLLSurvLoss(nn.Module):
         self.eps: float = 1e-8
         self.continuous: bool = False
 
-    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, censor: torch.Tensor):
+    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, event: torch.Tensor):
         """
         expects dicts with keys: censorship, surv, where hazard = nn.Sigmoid(surv_bin)
         the shapes of the tensors behind the keys should be:
@@ -222,14 +228,95 @@ class NLLSurvLoss(nn.Module):
         survival = torch.cumprod(1 - hazards, dim=1)
 
         # # S(-1) = 0, all patients are alive from (-inf, 0) by definition
-        survival_padded = torch.cat([torch.ones_like(censor).view(-1, 1), survival], 1)
+        survival_padded = torch.cat([torch.ones_like(event).view(-1, 1), survival], 1)
 
         survival_before_event = torch.gather(survival_padded, dim=1, index=y_true.view(-1, 1)).clamp(min=self.eps)
         hazard_at_event = torch.gather(hazards, dim=1, index=y_true.view(-1, 1)).clamp(min=self.eps)
         survival_at_event = torch.gather(survival_padded, dim=1, index=(y_true + 1).view(-1, 1)).clamp(min=self.eps)
 
-        uncensored_loss = -censor * ((torch.log(survival_before_event) + torch.log(hazard_at_event)))
-        censored_loss = -(1 - censor) * torch.log(survival_at_event)
+        uncensored_loss = -event * ((torch.log(survival_before_event) + torch.log(hazard_at_event)))
+        censored_loss = -(1 - event) * torch.log(survival_at_event)
 
         loss = (uncensored_loss + censored_loss) + (self.alpha * uncensored_loss)
+
+        return loss.sum()
+
+
+class BCESurvivalLoss(nn.Module):
+    def __init__(self, alpha: float) -> None:
+        super().__init__()
+        self.alpha: float = alpha
+        self.eps: float = 1e-8
+        self.continuous: bool = False
+
+    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, event: torch.Tensor):
+        """
+        expects dicts with keys: censorship, surv, where hazard = nn.Sigmoid(surv_bin)
+        the shapes of the tensors behind the keys should be:
+        censorship: [B,1] where 1 means uncensored (event occours) and 0 means censored (no event)
+        y_pred: [B,n_bins] Logits of bins predicted
+        y_true: [B,1] true bin
+        """
+        # # calculate estimated hazards
+        hazards = torch.sigmoid(y_pred)
+
+        # # survival is a cumulative product of 1-hazard
+        survival = torch.cumprod(1 - hazards, dim=1)
+
+        # # S(-1) = 0, all patients are alive from (-inf, 0) by definition
+        survival_padded = torch.cat([torch.ones_like(event).view(-1, 1), survival], 1)
+
+        survival_before_event = torch.gather(survival_padded, dim=1, index=y_true.view(-1, 1)).clamp(min=self.eps)
+        hazard_at_event = torch.gather(hazards, dim=1, index=y_true.view(-1, 1)).clamp(min=self.eps)
+        survival_at_event = torch.gather(survival_padded, dim=1, index=(y_true + 1).view(-1, 1)).clamp(min=self.eps)
+
+        uncensored_loss = -event * ((torch.log(survival_before_event) + torch.log(hazard_at_event)))
+        censored_loss = -(1 - event) * torch.log(survival_at_event) - event * torch.log(1 - survival_at_event)
+
+        loss = (uncensored_loss + censored_loss) + (self.alpha * uncensored_loss)
+        return loss.sum()
+
+
+class NnetSurvivalLoss(nn.Module):
+    """
+    Loss is adapted from https://peerj.com/articles/6257/
+    """
+
+    def __init__(self, alpha: float) -> None:
+        super().__init__()
+        self.alpha: float = alpha
+        self.eps: float = 1e-8
+        self.continuous: bool = False
+
+    def __call__(self, y_pred: torch.Tensor, y_true: torch.Tensor, event: torch.Tensor):
+        """
+        expects dicts with keys: censorship, surv, where hazard = nn.Sigmoid(surv_bin)
+        the shapes of the tensors behind the keys should be:
+        censorship: [B,1] where 1 means uncensored (event occours) and 0 means censored (no event)
+        y_pred: [B,n_bins] Logits of bins predicted
+        y_true: [B,1] true bin
+        """
+
+        # # calculate estimated hazards
+        hazards = torch.sigmoid(y_pred)
+
+        # # survival is a cumulative product of 1-hazard
+        survival = torch.cumprod(1 - hazards, dim=1)
+
+        n_bins = y_pred.shape[1]
+        # To adapt to the Nnet-surv loss we need to rearrange the y_true parts
+        adapted_y_true = torch.zeros((y_true.shape[0], n_bins * 2))
+        for i in range(y_true.shape[0]):
+            adapted_y_true[i, n_bins : n_bins * 2] = F.one_hot(y_true[i], n_bins)
+            adapted_y_true[i, 0:n_bins] = torch.zeros(n_bins).index_fill_(
+                0, torch.from_numpy(np.arange(y_true[i].shape[0])), 1
+            )
+
+        adapted_y_true = adapted_y_true.to(survival.device)
+        cens_uncens = 1.0 + adapted_y_true[:, 0:n_bins] * (survival - 1.0)  # component for all individuals
+        uncens = 1.0 - adapted_y_true[:, n_bins : 2 * n_bins] * survival  # component for only uncensored individuals
+        concatenated = torch.cat((cens_uncens, uncens), dim=-1)
+        clipped = torch.clamp(concatenated, min=torch.finfo(concatenated.dtype).eps)
+        loss = -torch.log(clipped)
+
         return loss.sum()

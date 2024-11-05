@@ -69,9 +69,7 @@ class AttentionPooling(nn.Module):
 
             outs.append(self.mapper(torch.matmul(att_soft, bag).view(1, -1)))
         if return_weights:
-            return torch.stack(outs).view(-1, self.hidden_dim if self.out_dim < 1 else self.out_dim, 1, 1), torch.stack(
-                weights
-            )
+            return torch.stack(weights)
         else:
             return torch.stack(outs).view(-1, self.hidden_dim if self.out_dim < 1 else self.out_dim, 1, 1)
 

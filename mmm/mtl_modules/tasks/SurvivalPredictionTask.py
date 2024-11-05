@@ -1,8 +1,9 @@
 from __future__ import annotations
-from typing import Any, List, Dict, Tuple, Union
+from typing import Any, List, Dict, Tuple, Union, Optional
 from typing_extensions import Annotated
 import random
 import logging
+from pydantic import Field
 
 import wandb
 import numpy as np
@@ -10,11 +11,8 @@ import torch
 import torch.nn as nn
 from torchvision.utils import make_grid
 from pydantic import Field
+from sksurv.metrics import concordance_index_censored
 
-try:
-    from lifelines.utils import concordance_index
-except ImportError:
-    concordance_index = None
 
 from mmm.logging.type_ext import StepMetricDict
 from mmm.logging.wandb_ext import build_wandb_image
@@ -26,7 +24,7 @@ from mmm.data_loading.RegressionDataset import RegressionDataset
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 from mmm.neural.losses import SurvivalLossConfig
-from mmm.neural import LossConfigs, SurvivalLossConfig
+from mmm.neural import LossConfigs
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 
@@ -49,19 +47,23 @@ class SurvivalPredictionTask(MTLTask):
         "image": ... # following MMM image instance assumptions
         "class": \in Survival bins # binned survival time
         "target": \in Survival time # float
-        "meta": {"censor": 0/1} # 0 if event happened, 1 if not
+        "meta": {"event": 0/1} # 0 if event happened, 1 if not
     }
     """
 
     class Config(MTLTask.Config):
         encoder_key: str = "encoder"
         squeezer_key: str = "squeezer"
-        grouper_key: str = "grouper"
+        grouper_key: str | None = None
         loss_fn: Annotated[LossConfigs, Field(discriminator="loss_type")] = SurvivalLossConfig(
-            loss_type="cox_reg", alpha=0.2
+            loss_type="bce_surv", alpha=0.2
         )
-        dropout: float = 0.375
-        max_visualizations_per_full_train_loop: int = 3
+        dropout: float = 0.2
+        max_visualizations_per_full_train_loop: int = -1
+        num_additional_infos: int = Field(
+            default=0,
+            description="Number of additional information fields, such as Age, BMI, etc to be used.\nWill be passed through a linear layer and added to the latent vector.",
+        )
 
     def __init__(
         self,
@@ -92,6 +94,10 @@ class SurvivalPredictionTask(MTLTask):
                 )
             }
         )
+        if self.args.num_additional_infos > 0:
+            new_dict["information_head"] = nn.Sequential(
+                nn.Linear(self.args.num_additional_infos, self.hidden_dim),
+            )
         return new_dict
 
     def prepare_batch(self, batch: Dict[str, Any]) -> Any:
@@ -103,13 +109,13 @@ class SurvivalPredictionTask(MTLTask):
         if "target" in batch:
             batch["target"] = batch["target"].to(self.torch_device)
         assert all(
-            ["censor" in list(x.keys()) for x in batch["meta"]]
-        ), "To predict survival you need to add 'censor' as key to the meta dict"
+            ["event" in list(x.keys()) for x in batch["meta"]]
+        ), "To predict survival you need to add 'event' as key to the meta dict"
 
         return batch
 
     def forward(self, inputs, shared_blocks: Dict[str, SharedBlock]):
-        x, supercase_indices = inputs
+        x, supercase_indices, add_x = inputs
         pyr = shared_blocks[self.args.encoder_key](x)
         _, hidden_vector = shared_blocks[self.args.squeezer_key](pyr)
         hidden_vector = self.flatten(hidden_vector)
@@ -118,6 +124,10 @@ class SurvivalPredictionTask(MTLTask):
             hidden_vector, self._grouper_weights = shared_blocks[self.args.grouper_key](
                 hidden_vector, supercase_indices
             )
+
+        if add_x is not None and "information_head" in self.task_modules:
+            info_emb = self.task_modules["information_head"](add_x)
+            hidden_vector = hidden_vector + info_emb
 
         out = self.task_modules["prediction_head"](hidden_vector)
         return out
@@ -128,6 +138,16 @@ class SurvivalPredictionTask(MTLTask):
             y = batch["target"]  # time of survival
         else:
             y = batch["class"]  # bins of survival
+
+        if "additional_info" in batch["meta"][0] and self.args.num_additional_infos > 0:
+            add_x = (
+                torch.cat([x["additional_info"] for x in batch["meta"]], dim=0)
+                .to(self.torch_device)
+                .view(-1, self.args.num_additional_infos)
+            )
+            add_x.requires_grad = True
+        else:
+            add_x = None
 
         # skip if batch is empty
         tensornums = [bool(t.numel()) for t in x]
@@ -146,13 +166,13 @@ class SurvivalPredictionTask(MTLTask):
             # the targets need to be grouped as well, currently y is a (B,) tensor with class indices
             # For each unique supercase index, we need to find the corresponding class index
             y = grouper.group_targets(y, supercase_indices)
-            censor = grouper.group_targets(torch.Tensor([x["censor"] for x in batch["meta"]]), supercase_indices)
+            event = grouper.group_targets(torch.Tensor([x["event"] for x in batch["meta"]]), supercase_indices)
         else:
             supercase_indices = None
-            censor = torch.Tensor([x["censor"] for x in batch["meta"]])
+            event = torch.Tensor([x["event"] for x in batch["meta"]])
             self._grouper_weights = None
 
-        y_hat = shared_blocks.forward((x, supercase_indices), self.forward)
+        y_hat = shared_blocks.forward((x, supercase_indices, add_x), self.forward)
 
         # either predict hazard directly or calculate it
         if self.criterion.continuous:
@@ -165,17 +185,17 @@ class SurvivalPredictionTask(MTLTask):
             "logits": y_hat.detach().cpu().numpy(),
             "preds": torch.argmax(hazards.detach().cpu(), dim=1).numpy(),
             "hazard": hazards.detach().cpu().numpy(),
-            "censor": censor.flatten().cpu().numpy(),
+            "event": event.flatten().cpu().numpy(),
         }
-        if sum(censor) > 1 and self.criterion.continuous:
+        if sum(event) > 1 and self.criterion.continuous:
             batch_loss = self.criterion(
-                y_pred=y_hat, y_true=y.view(-1, 1), censor=censor.view(-1, 1).to(self.torch_device)
+                y_pred=y_hat, y_true=y.view(-1, 1), event=event.view(-1, 1).to(self.torch_device)
             )
         elif not self.criterion.continuous:
             batch_loss = self.criterion(
                 y_pred=y_hat.view(-1, len(self.class_names)),
                 y_true=y.view(-1, 1),
-                censor=censor.view(-1, 1).to(self.torch_device),
+                event=event.view(-1, 1).to(self.torch_device),
             )
         else:
             return None
@@ -188,17 +208,32 @@ class SurvivalPredictionTask(MTLTask):
             (batch["meta"] if "meta" in batch else [{} for _ in range(batch["image"].shape[0])]),
             supercase_indices=supercase_indices if supercase_indices is not None else torch.Tensor([1]),
         )
+        if sum(event) > 1 and self.criterion.continuous:
+            batch_loss = self.criterion(
+                y_pred=y_hat, y_true=y.view(-1, 1), event=event.view(-1, 1).to(self.torch_device)
+            )
+            self.add_step_result(batch_loss.item(), step_results)
+        elif not self.criterion.continuous:
+            batch_loss = self.criterion(
+                y_pred=y_hat.view(-1, len(self.class_names)),
+                y_true=y.view(-1, 1),
+                event=event.view(-1, 1).to(self.torch_device),
+            )
+            self.add_step_result(batch_loss.item(), step_results)
+        else:
+            self.add_step_result(torch.zeros(1).item(), step_results)
+            return torch.ones(1), live_vis
         return batch_loss, live_vis
 
     def _visualize_preds(
-        self, training_ims, step_metrics: Dict, metas: List[Dict], supercase_indices
+        self, training_imgs, step_metrics: Dict, metas: List[Dict], supercase_indices
     ) -> Dict[str, Any]:
-        vis_n = min(self._takeout_vis_budget(), training_ims.size(0))
+        vis_n = min(self._takeout_vis_budget(), training_imgs.size(0))
 
         if vis_n <= 0:
             return {}
         # Assume Normal Images
-        if training_ims[0].shape[0] == 3:
+        if training_imgs[0].shape[0] == 3:
             # Select one of the groups for visualization
             group_index = random.choice(list(set(supercase_indices.cpu().numpy())))
             vis_indices = torch.where(supercase_indices == group_index)[0].cpu()
@@ -206,7 +241,7 @@ class SurvivalPredictionTask(MTLTask):
                 vis_cases_weights = self._grouper_weights[vis_indices]
                 rows = int(np.sqrt(len(vis_indices)))
                 # cols = training_ims[vis_indices].shape[0] // rows
-                grid_img = make_grid(training_ims[vis_indices], nrow=rows)
+                grid_img = make_grid(training_imgs[vis_indices], nrow=rows)
                 # Put the weights into rows
                 weight_chunks = []
                 for vis_case in vis_cases_weights:
@@ -220,12 +255,13 @@ class SurvivalPredictionTask(MTLTask):
                 {weight_str}
                 hazard: {step_metrics["hazard"][group_index]}
                 target: {step_metrics["targets"][group_index]}
-                event: {step_metrics['censor'][group_index]} 
+                event: {step_metrics['event'][group_index]}
+                additional info: {metas[vis_indices[0]]["additional_info"]}
                 {[metas[i] for i in vis_indices]=}
             """
             else:
                 rows = int(np.sqrt(len(vis_indices)))
-                grid_img = make_grid(training_ims[vis_indices], nrow=rows)
+                grid_img = make_grid(training_imgs[vis_indices], nrow=rows)
                 caption = f"""
                 Group {group_index} with {len(vis_indices)} subcases, group id: {metas[0]["group_id"]}
                 logits:
@@ -239,35 +275,36 @@ class SurvivalPredictionTask(MTLTask):
             )
         # Assume NICs
         else:
-            idx = np.random.choice(len(training_ims))
-            nic = training_ims[idx]
+            idx = np.random.choice(len(training_imgs))
+            nic = training_imgs[idx]
             meta = metas[idx]
             fmap_index = random.randint(0, nic.shape[0] - 1)
-            wandb_img = wandb.Image(nic[fmap_index], caption=f'{step_metrics["targets"]=}\n {step_metrics["preds"]=}')
+            if "original_image" in meta:
+                nic = meta["original_image"]
+            else:
+                nic = nic[fmap_index]
+            wandb_img = wandb.Image(nic, caption=f'{step_metrics["targets"]=}\n {step_metrics["preds"]=}')
 
         return {"preds": [wandb_img]}
 
     def log_epoch_metrics(self) -> Tuple[Dict[str, Any], str]:
         metrics = flatten_list_of_dicts(self._step_metrics)
-        if not self.criterion.continuous:
-            selected_metrics = ["c-index-disc"]
-        else:
-            selected_metrics = ["c-index"]
         _, print_str = super().log_epoch_metrics()
         log_dict = {}
 
-        if "c-index" in selected_metrics:
-            try:
-                log_dict["c-index"] = concordance_index(
-                    metrics["targets"].squeeze(), -metrics["preds"].squeeze(), metrics["censor"].squeeze()
-                )
-            except ZeroDivisionError:
-                logging.info("Had no uncensored datapoints in epoch. Will yield 0.5")
-                log_dict["c-index"] = 0.5
-        if "c-index-disc" in selected_metrics:
-            risk = -torch.sum(torch.cumprod(torch.from_numpy(metrics["hazard"]), dim=1), dim=1)
-            log_dict["c-index"] = concordance_index(
-                metrics["targets"].squeeze(), risk.squeeze(), metrics["censor"].squeeze()
-            )
+        risk = torch.sum(torch.cumprod(torch.from_numpy(metrics["hazard"]), dim=1), dim=1).numpy()
+
+        log_dict["c-index"] = concordance_index_censored(
+            event_time=metrics["targets"].squeeze(),
+            estimate=risk.squeeze(),
+            event_indicator=metrics["event"].squeeze().astype(bool),
+        )[0]
+
+        log_dict["reverse-c-ind"] = concordance_index_censored(
+            event_time=metrics["targets"].squeeze(),
+            estimate=risk.squeeze() * -1,
+            event_indicator=metrics["event"].squeeze().astype(bool),
+        )[0]
+        print_str = f'{print_str} - c-index: {log_dict["c-index"]}'
 
         return log_dict, print_str
