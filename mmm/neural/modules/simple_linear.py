@@ -53,6 +53,7 @@ class SimpleLinearNet(nn.Module, EncoderModel):
     class Config(BaseModel):
         architecture: Literal["simplelinearnet"] = "simplelinearnet"
         in_features: int = 3
+        out_features: int = 10
         depth: int = 1
         norm: bool = True
         activation: ActivationFunctionConfig = ActivationFunctionConfig(fn_type=ActivationFn.GeLU)
@@ -64,15 +65,35 @@ class SimpleLinearNet(nn.Module, EncoderModel):
         super().__init__()
         self.args = args
 
-        hidden_layers = [
-            LinearNormActivation(
-                self.args.in_features,
-                self.args.in_features,
-                args.norm,
-                args.activation,
+        # if the  network is growing towards the end, we assume dilation
+        dilated_network = args.in_features < args.out_features
+        factor = (args.in_features - args.out_features) / (args.in_features * args.depth)
+
+        hidden_layers = []
+        current_dim = args.in_features
+        for _ in range(args.depth - 1):
+            if dilated_network:
+                next_dim = min(int(current_dim * (1 - factor)), args.out_features)
+            else:
+                next_dim = int(current_dim * (1 - factor))
+            hidden_layers.append(
+                LinearNormActivation(
+                    in_channels=current_dim,
+                    out_channels=next_dim,
+                    norm=args.norm,
+                    activation=args.activation,
+                )
             )
-            for _ in range(-1, self.args.depth - 1)
-        ]
+            current_dim = next_dim
+
+        hidden_layers.append(
+            LinearNormActivation(
+                in_channels=current_dim,
+                out_channels=args.out_features,
+                norm=args.norm,
+                activation=args.activation,
+            )
+        )
         self.linear_layers = nn.ModuleList(hidden_layers)
 
         with torch.no_grad():
@@ -81,7 +102,7 @@ class SimpleLinearNet(nn.Module, EncoderModel):
             )
 
     def get_feature_pyramid_channels(self) -> List[int]:
-        return [self.args.in_features for _ in range(self.args.depth)]
+        return [self.args.out_features for _ in range(self.args.depth)]
 
     def get_strides(self) -> List[int]:
         return self.strides

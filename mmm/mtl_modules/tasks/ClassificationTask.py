@@ -34,6 +34,8 @@ from sklearn.metrics import (
     accuracy_score,
     f1_score,
     top_k_accuracy_score,
+    balanced_accuracy_score,
+    cohen_kappa_score,
 )
 
 
@@ -56,7 +58,7 @@ class ClassificationTask(MTLTask):
         )
         loss_fn: Annotated[LossConfigs, Field(discriminator="loss_type")] = CrossEntropyLossConfig()
         dropout: float = 0.2
-        metrics: Optional[List[Literal["confusion matrix", "accuracy", "top5accuracy", "auc", "f1"]]] = Field(
+        metrics: Optional[List[Literal["confusion matrix", "accuracy", "top5accuracy", "auc", "f1", "kappa"]]] = Field(
             default=None,
             description="If none, the task will decide which metrics make sense",
         )
@@ -210,42 +212,48 @@ class ClassificationTask(MTLTask):
         if vis_n <= 0:
             return {}
 
-        if supercase_indices is not None:
+        img = training_ims[0]
+        if img.shape[0] == 3:
             # Select one of the groups for visualization
-            group_index = random.choice(list(set(supercase_indices.cpu().numpy())))
-            grid_img, weight_str, vis_indices = make_grid_for_supercase(
-                training_ims, supercase_indices, group_index, self._grouper_weights
-            )
-
-            caption = f"""
-Group {group_index} with {len(vis_indices)} subcases, group id: {metas[0]["group_id"]}
-weights:
-{weight_str}
-logits:
-{step_metrics["logits"][group_index]}
-{[metas[i] for i in vis_indices]=}
-            """
-            wandb_img, description, true_str, pred_str = build_wandb_image_for_clf(
-                grid_img,
-                step_metrics["targets"][group_index],
-                step_metrics["preds"][group_index],
-                self.class_names,
-                caption_suffix=caption,
-            )
-            return {"preds": [wandb_img]}
-        else:
-            preds = []
-            for rand_index in random.sample(list(range(training_ims.size(0))), vis_n):
-                metastr = json.dumps(metas[rand_index], default=lambda o: str(o))
-                wandb_img, description, true_str, pred_str = build_wandb_image_for_clf(
-                    training_ims[rand_index],
-                    step_metrics["targets"][rand_index],
-                    step_metrics["preds"][rand_index],
-                    self.class_names,
-                    caption_suffix=metastr,
+            if supercase_indices is not None:
+                group_index = random.choice(list(set(supercase_indices.cpu().numpy())))
+                vis_indices = torch.where(supercase_indices == group_index)[0].cpu()
+                grid_img, weight_str, vis_indices = make_grid_for_supercase(
+                    training_ims, supercase_indices, group_index, self._grouper_weights
                 )
-                preds.append(wandb_img)
-            return {"preds": preds} if preds else {}
+                caption = f"""
+                Group {group_index} with {len(vis_indices)} subcases, group id: {metas[0]["group_id"]}
+                weights:{weight_str}
+                logits:{step_metrics["logits"][group_index]}
+                """
+                wandb_img, description, true_str, pred_str = build_wandb_image_for_clf(
+                    grid_img,
+                    step_metrics["targets"][group_index],
+                    step_metrics["preds"][group_index],
+                    self.class_names,
+                    caption_suffix=caption,
+                )
+                return {"preds": [wandb_img]}
+            else:
+                preds = []
+                for rand_index in random.sample(list(range(training_ims.size(0))), vis_n):
+                    metastr = json.dumps(metas[rand_index], default=lambda o: str(o))
+                    wandb_img, description, true_str, pred_str = build_wandb_image_for_clf(
+                        training_ims[rand_index],
+                        step_metrics["targets"][rand_index],
+                        step_metrics["preds"][rand_index],
+                        self.class_names,
+                        caption_suffix=metastr,
+                    )
+                    preds.append(wandb_img)
+                return {"preds": preds} if preds else {}
+        else:
+            idx = np.random.choice(len(training_ims))
+            nic = training_ims[idx]
+            meta = metas[idx]
+            metastr = json.dumps(meta, default=lambda o: str(o))
+            fmap_index = np.random.choice(nic.shape[0], 3)  # random.randint(0, nic.shape[0] - 1)
+            return {"fmap": wandb.Image(nic[fmap_index], caption=metastr)}
 
     def _get_short_class_names(self, max_length=10):
         if True in [len(c) > max_length for c in self.class_names]:
@@ -257,7 +265,7 @@ logits:
         metrics = flatten_list_of_dicts(self._step_metrics)
         if self.args.metrics is None:
             if len(self.class_names) <= mtl_settings.max_classes_detailed_logging:
-                selected_metrics = ["confusion matrix", "accuracy", "auc", "f1"]
+                selected_metrics = ["confusion matrix", "accuracy", "auc", "f1", "kappa"]
             else:
                 selected_metrics = ["accuracy", "top5accuracy"]
         else:
@@ -268,6 +276,7 @@ logits:
 
         if "accuracy" in selected_metrics:
             log_dict["acc"] = accuracy_score(y_true=metrics["targets"], y_pred=metrics["preds"])
+            log_dict["acc_balanced"] = balanced_accuracy_score(y_true=metrics["targets"], y_pred=metrics["preds"])
             print_str = f"{print_str} - acc: {log_dict['acc']}"
 
         if "top5accuracy" in selected_metrics:
@@ -305,5 +314,12 @@ logits:
 
         if "f1" in selected_metrics:
             log_dict["f1"] = f1_score(y_true=metrics["targets"], y_pred=metrics["preds"], average="macro")
+            log_dict["f1_weighted"] = f1_score(y_true=metrics["targets"], y_pred=metrics["preds"], average="weighted")
+
+        if "kappa" in selected_metrics:
+            log_dict["kappa_linear"] = cohen_kappa_score(y1=metrics["targets"], y2=metrics["preds"], weights="linear")
+            log_dict["kappa_quadratic"] = cohen_kappa_score(
+                y1=metrics["targets"], y2=metrics["preds"], weights="quadratic"
+            )
 
         return log_dict, print_str
