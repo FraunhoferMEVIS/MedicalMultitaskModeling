@@ -94,7 +94,9 @@ sudo apt install python3-opencv -y
 
 ## Citation
 
-If you use this project, please cite [our work](https://doi.org/10.1038/s43588-024-00662-z):
+If you use this project, please cite our work:
+- [Overcoming data scarcity in biomedical imaging with a foundational multi-task model](https://doi.org/10.1038/s43588-024-00662-z)
+- [Tissue Concepts: supervised foundation models in computational pathology](https://arxiv.org/abs/2409.03519)
 
 ```
 @article{SchaeferOvercoming2024,
@@ -104,6 +106,14 @@ If you use this project, please cite [our work](https://doi.org/10.1038/s43588-0
     doi = {10.1038/s43588-024-00662-z},
     author = {Schäfer, Raphael and Nicke, Till and Höfener, Henning and Lange, Annkristin and Merhof, Dorit and Feuerhake, Friedrich and Schulz, Volkmar and Lotz, Johannes and Kiessling, Fabian},
     year = {2024},
+}
+
+@article{nicke2024tissue,
+  title={Tissue Concepts: supervised foundation models in computational pathology},
+  author={Nicke, Till and Schaefer, Jan Raphael and Hoefener, Henning and Feuerhake, Friedrich and Merhof, Dorit and Kiessling, Fabian and Lotz, Johannes},
+  journal={arXiv preprint arXiv:2409.03519},
+  doi = {10.48550/arXiv.2409.03519}
+  year={2024}
 }
 ```
 
