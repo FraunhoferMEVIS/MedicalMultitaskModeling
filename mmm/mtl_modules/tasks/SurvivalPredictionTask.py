@@ -1,33 +1,37 @@
 from __future__ import annotations
-from typing import Any, List, Dict, Tuple, Union, Optional
-from typing_extensions import Annotated
-import random
-import logging
-from pydantic import Field
 
-import wandb
+import logging
+import random
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torchvision.utils import make_grid
+import wandb
 from pydantic import Field
-from sksurv.metrics import concordance_index_censored
+from torchvision.utils import make_grid
+from typing_extensions import Annotated
+
+try:
+    from sksurv.metrics import concordance_index_censored
+except ImportError:
+    logging.warning(
+        """Time to Event (Survival) extra dependencies are not installed. Only required for SurvivalPrediction tasks and related components.
+Please install scikit-survival to use."""
+    )
 
 
-from mmm.logging.type_ext import StepMetricDict
-from mmm.logging.wandb_ext import build_wandb_image
-
-from mmm.mtl_modules.tasks.MTLTask import MTLTask
-from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.data_loading.ClassificationDataset import ClassificationDataset
 from mmm.data_loading.RegressionDataset import RegressionDataset
+from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.logging.type_ext import StepMetricDict
+from mmm.logging.wandb_ext import build_wandb_image
+from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
-from mmm.mtl_modules.shared_blocks.Grouper import Grouper
-from mmm.neural.losses import SurvivalLossConfig
-from mmm.neural import LossConfigs
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
-from mmm.mtl_modules.shared_blocks.Grouper import Grouper
-
+from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.neural import LossConfigs
+from mmm.neural.losses import SurvivalLossConfig
 from mmm.utils import flatten_list_of_dicts
 
 SurvivalDatasets = Union[RegressionDataset, ClassificationDataset]
@@ -74,7 +78,7 @@ class SurvivalPredictionTask(MTLTask):
         ],  # accepts Regression or Classification Datasets. Depending on the loss
     ):
         super().__init__(args, cohort)
-        self.args: SurvivalPredictionTask.Config  # Make sure IDE knows about the task specific fields
+        self.args: (SurvivalPredictionTask.Config)  # Make sure IDE knows about the task specific fields
         self.criterion: nn.Module = self.args.loss_fn.build_instance()
         self.hidden_dim = hidden_dim
         if self.criterion.continuous:
@@ -189,7 +193,9 @@ class SurvivalPredictionTask(MTLTask):
         }
         if sum(event) > 1 and self.criterion.continuous:
             batch_loss = self.criterion(
-                y_pred=y_hat, y_true=y.view(-1, 1), event=event.view(-1, 1).to(self.torch_device)
+                y_pred=y_hat,
+                y_true=y.view(-1, 1),
+                event=event.view(-1, 1).to(self.torch_device),
             )
         elif not self.criterion.continuous:
             batch_loss = self.criterion(
@@ -206,11 +212,13 @@ class SurvivalPredictionTask(MTLTask):
             x.detach().cpu(),
             step_results,
             (batch["meta"] if "meta" in batch else [{} for _ in range(batch["image"].shape[0])]),
-            supercase_indices=supercase_indices if supercase_indices is not None else torch.Tensor([1]),
+            supercase_indices=(supercase_indices if supercase_indices is not None else torch.Tensor([1])),
         )
         if sum(event) > 1 and self.criterion.continuous:
             batch_loss = self.criterion(
-                y_pred=y_hat, y_true=y.view(-1, 1), event=event.view(-1, 1).to(self.torch_device)
+                y_pred=y_hat,
+                y_true=y.view(-1, 1),
+                event=event.view(-1, 1).to(self.torch_device),
             )
             self.add_step_result(batch_loss.item(), step_results)
         elif not self.criterion.continuous:
