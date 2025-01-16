@@ -1,19 +1,18 @@
-from pydantic import Field
+import logging
 import random
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+
+import albumentations as A
 import numpy as np
 import torch
-import logging
-from typing import Any, Callable, List, Tuple, Dict, Optional, Set, Iterable
-
-import torchvision.transforms.functional as F
 import torchvision.transforms as transforms
-from torchvision.models.detection.transform import resize_boxes
-import albumentations as A
-
+import torchvision.transforms.functional as F
 from mmm.BaseModel import BaseModel
-from mmm.utils import make_divisable_by
-from mmm.data_loading.geojson import GeojsonRegionWindows, GeoAnno
+from mmm.data_loading.geojson import GeoAnno, GeojsonRegionWindows
 from mmm.logging.type_ext import TransformsSeqType
+from mmm.utils import make_divisable_by
+from pydantic import Field
+from torchvision.models.detection.transform import resize_boxes
 
 
 class TupleToDict:
@@ -354,6 +353,7 @@ class Alb:
 
         transformed_case = _atransform_into_case(transformed)
         d.update(transformed_case)
+
         return d
 
 

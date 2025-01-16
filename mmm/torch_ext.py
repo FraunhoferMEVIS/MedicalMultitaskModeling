@@ -3,41 +3,42 @@ Utilities that extend the PyTorch types, not relying on our MTL extensions such 
 """
 
 from __future__ import annotations
-from copy import deepcopy
-import os
+
 import logging
+import math
+import os
 import random
+from copy import deepcopy
+from pathlib import Path
 from typing import (
     Callable,
-    Generic,
-    Optional,
-    Sized,
-    Union,
-    TypeVar,
     Dict,
-    cast,
+    Generic,
     Iterator,
     List,
+    Optional,
+    Sized,
     Tuple,
+    TypeVar,
+    Union,
+    cast,
 )
-from pathlib import Path
+
 import numpy as np
-import math
 import torch
 import torch.nn as nn
-from torch.utils.data import (
-    Dataset,
-    ChainDataset,
-    Subset,
-    IterableDataset,
-    get_worker_info,
-    DataLoader,
-)
-from tqdm.auto import tqdm
-
 from mmm.BaseModel import BaseModel
 from mmm.data_loading.MTLDataset import MTLDataset
 from mmm.utils import get_default_cachepath
+from torch.utils.data import (
+    ChainDataset,
+    DataLoader,
+    Dataset,
+    IterableDataset,
+    Subset,
+    get_worker_info,
+)
+from tqdm.auto import tqdm
 
 T = TypeVar("T")
 

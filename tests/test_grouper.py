@@ -27,7 +27,24 @@ from mmm.mtl_modules.shared_blocks.Grouper import Grouper
                     [3, 4, 5],
                 ]
             ),
-            ["1", "1", "1", "1", "2", "2", "2", "2", "3", "3", "3", "3", "4", "4", "4", "4"],
+            [
+                "1",
+                "1",
+                "1",
+                "1",
+                "2",
+                "2",
+                "2",
+                "2",
+                "3",
+                "3",
+                "3",
+                "3",
+                "4",
+                "4",
+                "4",
+                "4",
+            ],
         ),
         (
             torch.Tensor(
@@ -60,7 +77,12 @@ def test_pooling_reducer(pseudo_bag: tuple, grouper_args: Grouper.Config):
 
     reduced, weights = grouper(bag, supercase_indexes)
 
+    num_returns = 4
+    if hasattr(grouper.reducer, "num_instances"):
+        # Testing CLAM with minial examples (<10), leads to all examples being returned
+        num_returns = 4 + bag.shape[0]
+
     assert reduced.shape == torch.Size(
-        [4, 3]
+        [num_returns, 3]
     ), f"Failed {grouper_args.version}-grouper and {grouper_args.attention_heads} weights"
     assert weights is not None, f"Failed {grouper_args.version}-grouper and {grouper_args.attention_heads} weights"

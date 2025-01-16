@@ -1,32 +1,28 @@
-from pathlib import Path
-import typing as tau
-from typing import Callable
 import os
+import tempfile
+import typing as tau
+from pathlib import Path
+from typing import Callable
+
 import pytest
-import wandb
 import torch
 import torchvision.transforms as transforms
-import tempfile
-
+import wandb
+from mmm.data_loading.SemSegDataset import SemSegDataset
+from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
+from mmm.data_loading.synthetic.shape_dataset import CanvasConfig, ShapeDataset
+from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.mtl_modules.shared_blocks.Grouper import Grouper
+from mmm.mtl_modules.shared_blocks.PyramidDecoder import PyramidDecoder
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.mtl_modules.tasks.SemSegTask import SemSegTask
 from mmm.optimization.MTLOptimizer import MTLOptimizer, SchedulerType
-
-from mmm.data_loading.TrainValCohort import TrainValCohort
-from mmm.data_loading.SemSegDataset import SemSegDataset
-from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
-from mmm.data_loading.synthetic.shape_dataset import ShapeDataset, CanvasConfig
 from mmm.transforms import KeepOnlyKeysInDict
-from mmm.mtl_modules.shared_blocks.Grouper import Grouper
-
-
-from mmm.mtl_modules.shared_blocks.PyramidDecoder import PyramidDecoder
-
+from tests.test_mtl_training import mtl_semseg_trainer_factory
 
 # Extern fixtures
 from tests.test_mtloptimizer import default_optim_config
-from tests.test_shared_blocks import default_encoder_factory, default_decoder_factory
-from tests.test_mtl_training import mtl_semseg_trainer_factory
+from tests.test_shared_blocks import default_decoder_factory, default_encoder_factory
 
 
 def pytest_generate_tests(metafunc):
@@ -127,13 +123,12 @@ def shape_segtask_factory(shape_semseg_cohort: TrainValCohort):
 
 
 @pytest.fixture(
-    ids=["weighted", "attention", "gated-attention", "attention-4", "gated-attention-4"],
+    ids=["weighted", "attention", "clam-attention", "attention-4"],
     params=[
         Grouper.Config(version="weighted", attention_heads=1),
         Grouper.Config(version="attention", attention_heads=1),
-        Grouper.Config(version="gated-attention", attention_heads=1),
+        Grouper.Config(version="clam-attention", attention_heads=1),
         Grouper.Config(version="attention", attention_heads=4),
-        Grouper.Config(version="gated-attention", attention_heads=4),
     ],
 )
 def grouper_args(request):

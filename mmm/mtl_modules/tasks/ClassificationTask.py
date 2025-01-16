@@ -1,42 +1,39 @@
 from __future__ import annotations
-import json
-from ast import Not
-from typing import Any, List, Dict, Mapping, Tuple, Optional, Type, Literal
-from typing_extensions import Annotated
-import random
-from PIL.Image import Image as PIL_Image
-import logging
 
-import wandb
+import json
+import logging
+import random
+from ast import Not
+from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Type
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset
-
-from pydantic import Field
-
+import wandb
+from mmm.data_loading.ClassificationDataset import ClassificationDataset
+from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.logging.type_ext import StepMetricDict
 from mmm.logging.wandb_ext import build_wandb_image_for_clf
-
-from .MTLTask import MTLTask
-from mmm.settings import mtl_settings
-from mmm.data_loading.TrainValCohort import TrainValCohort
-from mmm.data_loading.ClassificationDataset import ClassificationDataset
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.Grouper import Grouper, make_grid_for_supercase
-from mmm.neural import LossConfigs, CrossEntropyLossConfig
+from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
-from mmm.mtl_modules.shared_blocks.Grouper import Grouper
-
+from mmm.neural import CrossEntropyLossConfig, LossConfigs
+from mmm.settings import mtl_settings
 from mmm.utils import flatten_list_of_dicts
+from PIL.Image import Image as PIL_Image
+from pydantic import Field
 from sklearn.metrics import (
-    roc_auc_score,
     accuracy_score,
-    f1_score,
-    top_k_accuracy_score,
     balanced_accuracy_score,
     cohen_kappa_score,
+    f1_score,
+    roc_auc_score,
+    top_k_accuracy_score,
 )
+from torch.utils.data import Dataset
+from typing_extensions import Annotated
+
+from .MTLTask import MTLTask
 
 
 class ClassificationTask(MTLTask):
@@ -176,9 +173,6 @@ class ClassificationTask(MTLTask):
                 self.torch_device
             )
 
-            # batch sizes might be unified here for some settings of the Grouper.
-            # x = grouper.unify_bagsizes(bag=x, supercase_indices=supercase_indices)
-
             # the targets need to be grouped as well, currently y is a (B,) tensor with class indices
             # For each unique supercase index, we need to find the corresponding class index
             y = grouper.group_targets(y, supercase_indices)
@@ -265,7 +259,13 @@ class ClassificationTask(MTLTask):
         metrics = flatten_list_of_dicts(self._step_metrics)
         if self.args.metrics is None:
             if len(self.class_names) <= mtl_settings.max_classes_detailed_logging:
-                selected_metrics = ["confusion matrix", "accuracy", "auc", "f1", "kappa"]
+                selected_metrics = [
+                    "confusion matrix",
+                    "accuracy",
+                    "auc",
+                    "f1",
+                    "kappa",
+                ]
             else:
                 selected_metrics = ["accuracy", "top5accuracy"]
         else:

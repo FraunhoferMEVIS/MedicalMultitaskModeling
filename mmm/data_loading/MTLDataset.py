@@ -1,24 +1,33 @@
 from __future__ import annotations
-import warnings
-from enum import Enum, auto
-import os
-import numpy as np
+
 import logging
-from pathlib import Path
-from abc import abstractmethod
+import os
 import random
-from typing import Callable, Any, List, Tuple, Optional, TypeVar, Set, NewType, Iterator
-from typing import Generic, TypeVar
-from torch.utils.data import Dataset
+import warnings
+from abc import abstractmethod
+from enum import Enum, auto
+from pathlib import Path
+from typing import (
+    Any,
+    Callable,
+    Generic,
+    Iterator,
+    List,
+    NewType,
+    Optional,
+    Set,
+    Tuple,
+    TypeVar,
+)
 
-
-from tqdm.auto import tqdm
+import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, IterableDataset
-from torch.utils.data._utils.collate import default_collate
 from mmm.BaseModel import BaseModel
 from mmm.transforms import KeepOnlyKeysInDict
-from mmm.utils import disk_cacher, unique_str_hash, recursive_equality
+from mmm.utils import disk_cacher, recursive_equality, unique_str_hash
+from torch.utils.data import DataLoader, Dataset, IterableDataset
+from torch.utils.data._utils.collate import default_collate
+from tqdm.auto import tqdm
 
 
 class InvalidCaseError(Exception):
@@ -279,7 +288,7 @@ class MTLDataset(Dataset[SrcCaseType]):
         Starts by adding one example per class, then draws random samples until the fraction criterion is met.
         """
         assert fraction > 0.0 and fraction <= 1.0
-        from mmm.data_loading.utils import train_val_split, TransformedSubset
+        from mmm.data_loading.utils import TransformedSubset, train_val_split
         from mmm.torch_ext import CachingSubCaseDS
 
         self.reduced_size = fraction
@@ -390,7 +399,7 @@ class MTLDataset(Dataset[SrcCaseType]):
         return res
 
     def st_find_invalid_cases(self) -> None:
-        from mmm.logging.st_ext import stw, st
+        from mmm.logging.st_ext import st, stw
 
         with st.form("validator settings"):
             shuffle = st.checkbox("shuffle", value=True)
@@ -422,7 +431,7 @@ class MTLDataset(Dataset[SrcCaseType]):
                     stw(batch)
 
     def _st_repr_(self, st_prefix: str = "") -> None:
-        from mmm.logging.st_ext import stw, st
+        from mmm.logging.st_ext import st, stw
 
         stw(f"### {self.__class__.__name__} of style {self.get_dataset_style()}")
 
