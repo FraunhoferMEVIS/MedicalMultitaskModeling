@@ -1,25 +1,26 @@
-import random
-import os
-import wandb
-import json
-import numpy as np
-import torch
-import logging
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
-from typing import List, Tuple, Dict, Any, Literal
-import torchvision.transforms.functional as tvF
-import tiffslide as ts
-from pathlib import Path
 import itertools
-from tqdm.notebook import tqdm
-from sklearn.metrics import accuracy_score, f1_score
+import json
+import logging
+import os
+import random
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Tuple
 
-
-from mmm.utils import convert_tile_into_patchbatch, flatten_list_of_dicts
-from mmm.mtl_modules.tasks.ClassificationTask import ClassificationTask
+import numpy as np
+import tiffslide as ts
+import torch
+import torchvision.transforms.functional as tvF
+import wandb
+from mmm.interactive import blocks
+from mmm.interactive import configs as cfs
+from mmm.interactive import data, pipes, tasks, training
 from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
-from mmm.interactive import blocks, configs as cfs, data, pipes, tasks, training
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
+from mmm.mtl_modules.tasks.ClassificationTask import ClassificationTask
+from mmm.utils import convert_tile_into_patchbatch, flatten_list_of_dicts
+from sklearn.metrics import accuracy_score, f1_score
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from tqdm.notebook import tqdm
 
 
 class SemiColConfig(cfs.BaseModel):
@@ -85,12 +86,6 @@ class NICTask(ClassificationTask):
             return None
 
         y_hat = shared_blocks.forward(x, self.forward)
-
-        # dealing last batch of a Cachingsubcase Dataset
-        assert y.shape[0] == y_hat.shape[0], f"Till found something, {y.shape=}, {y_hat.shape=}"
-        # if not y.shape[0] == y_hat.shape[0]:
-        #     y = y.long()
-        #     y_hat = y_hat.unsqueeze(0)
 
         batch_loss = self.criterion(y_hat, y) / np.log(len(self.class_names))
         split = np.asarray([b["split"] for b in batch["meta"]])

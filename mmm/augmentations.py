@@ -1,20 +1,19 @@
-import logging
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+
+import albumentations as A
 import cv2
+import monai.transforms as monai_transforms
 import numpy as np
-from typing import Dict, Any, List, TypeVar, Tuple, Optional, Union, Callable
-from PIL.Image import Image
-import cv2 as cv
 import torch
 import torch.nn as nn
-from torchvision import transforms
-from monai.data.meta_tensor import MetaTensor
-import monai.transforms as monai_transforms
-import albumentations as A
 import torchvision.transforms.functional as F
 from mmm.BaseModel import BaseModel
-from mmm.transforms import RandomApply
 from mmm.logging.type_ext import TransformsSeqType
 from mmm.settings import mtl_settings
+from mmm.transforms import RandomApply
+from monai.data.meta_tensor import MetaTensor
+from PIL.Image import Image
+from torchvision import transforms
 
 # Typevariable for either a PIL image or a Tensor, indicates that the augmentation does not change the type
 ImageType = TypeVar("ImageType", Image, torch.Tensor)
@@ -29,11 +28,15 @@ def get_histo_augs(
         A.OneOf(  # Color variation (OneOf always executes exactly one if it is chosen)
             [
                 # Included for positive transfer to grayscale images via multi-task learning
-                A.ToGray(p=0.2),
+                A.ToGray(p=0.1),
                 A.ChannelShuffle(p=0.2),
                 # Should approximate typical color variation in stains
                 A.HueSaturationValue(
-                    hue_shift_limit=30, sat_shift_limit=20, val_shift_limit=20, always_apply=False, p=0.7
+                    hue_shift_limit=30,
+                    sat_shift_limit=20,
+                    val_shift_limit=20,
+                    always_apply=False,
+                    p=0.7,
                 ),
             ],
             p=0.5,
@@ -50,9 +53,9 @@ def get_histo_augs(
         A.OneOf(
             [
                 A.RandomGamma(p=1),
-                A.GaussNoise(),
+                A.GaussNoise(p=1),
             ],
-            p=0.3,
+            p=0.5,
         ),
         A.OneOf(
             [
@@ -450,6 +453,16 @@ class SimCLRPatchAug:
         return self.cl_transform(img)
 
 
+class PoissonNoise(A.ImageOnlyTransform):
+    def __init__(self, always_apply=False, p=0.5):
+        super().__init__(p, always_apply)
+
+    def apply(self, img, **params):
+        noise = np.random.poisson(img, img.shape)
+        img = img + noise
+        return img.astype(np.uint8)
+
+
 class RandomLineAugmentation:
     def __init__(self, p=0.7) -> None:
         self.p = p
@@ -473,11 +486,11 @@ class RandomLineAugmentation:
 
             # create artifact mask
             artifacts = torch.ones((data_x, data_y, 1), dtype=torch.uint8).numpy() * 255
-            line_mask = cv.line(artifacts, pt1, pt2, color=(0, 0, 0), thickness=data_x // 32) / 255
+            line_mask = cv2.line(artifacts, pt1, pt2, color=(0, 0, 0), thickness=data_x // 32) / 255
 
             rnd_blurr_divider = torch.randint(15, 20, size=(1,)).item()
             # (data_x//rnd_blurr_divider, data_y//rnd_blurr_divider))
-            blurred_mask = cv.blur(line_mask, (data_x // rnd_blurr_divider, data_y // rnd_blurr_divider))
+            blurred_mask = cv2.blur(line_mask, (data_x // rnd_blurr_divider, data_y // rnd_blurr_divider))
 
             # multiply input img with mask to create artifact
             return image * blurred_mask  # , blurred_mask
@@ -502,7 +515,7 @@ class RandomBlobAugmentation:
 
             artifacts = torch.ones((data_x, data_y, 1), dtype=torch.uint8).numpy() * 255
             circle_mask = (
-                cv.circle(
+                cv2.circle(
                     artifacts,
                     center,
                     radius=data_x // rnd_size_divider,
@@ -512,7 +525,7 @@ class RandomBlobAugmentation:
                 / 255
             )
             rnd_blurr_divider = torch.randint(15, 20, size=(1,)).item()
-            blurred_mask = cv.blur(circle_mask, (data_x // rnd_blurr_divider, data_y // rnd_blurr_divider))
+            blurred_mask = cv2.blur(circle_mask, (data_x // rnd_blurr_divider, data_y // rnd_blurr_divider))
 
             return image * blurred_mask  # , blurred_mask
 
