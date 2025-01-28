@@ -13,7 +13,7 @@ from torchvision.utils import make_grid
 from typing_extensions import Annotated
 
 try:
-    from sksurv.metrics import concordance_index_censored
+    from lifelines.utils import concordance_index
 except ImportError:
     logging.warning(
         """Time to Event (Survival) extra dependencies are not installed. Only required for SurvivalPrediction tasks and related components.
@@ -78,7 +78,7 @@ class SurvivalPredictionTask(MTLTask):
         ],  # accepts Regression or Classification Datasets. Depending on the loss
     ):
         super().__init__(args, cohort)
-        self.args: (SurvivalPredictionTask.Config)  # Make sure IDE knows about the task specific fields
+        self.args: SurvivalPredictionTask.Config  # Make sure IDE knows about the task specific fields
         self.criterion: nn.Module = self.args.loss_fn.build_instance()
         self.hidden_dim = hidden_dim
         if self.criterion.continuous:
@@ -302,16 +302,16 @@ class SurvivalPredictionTask(MTLTask):
 
         risk = torch.sum(torch.cumprod(torch.from_numpy(metrics["hazard"]), dim=1), dim=1).numpy()
 
-        log_dict["c-index"] = concordance_index_censored(
-            event_time=metrics["targets"].squeeze(),
-            estimate=risk.squeeze(),
-            event_indicator=metrics["event"].squeeze().astype(bool),
+        log_dict["c-index"] = concordance_index(
+            event_times=metrics["targets"].squeeze(),
+            predicted_scores=risk.squeeze(),
+            event_observed=metrics["event"].squeeze().astype(bool),
         )[0]
 
-        log_dict["reverse-c-ind"] = concordance_index_censored(
-            event_time=metrics["targets"].squeeze(),
-            estimate=risk.squeeze() * -1,
-            event_indicator=metrics["event"].squeeze().astype(bool),
+        log_dict["reverse-c-ind"] = concordance_index(
+            event_times=metrics["targets"].squeeze(),
+            predicted_scores=risk.squeeze() * -1,
+            event_observed=metrics["event"].squeeze().astype(bool),
         )[0]
         print_str = f'{print_str} - c-index: {log_dict["c-index"]}'
 
