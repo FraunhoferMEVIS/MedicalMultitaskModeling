@@ -86,7 +86,6 @@ wandb = "^0.18.3"
 albumentations = "^1.4.17"
 # Survival
 lifelines = "^0.29.0"
-scikit-survival = "^0.23.0"
 
 [tool.poetry.group.deploy]
 optional = true
