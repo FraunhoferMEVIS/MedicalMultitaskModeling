@@ -96,6 +96,65 @@ test-extra-export:
     reports:
       junit: report.xml
 
+test-build-package:
+  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  stage: test
+  needs: [get-version, build-and-publish-stack-image]
+  tags:
+    - docker
+  script:
+    - poetry build -f wheel
+  artifacts:
+    paths:
+      - dist/*.whl
+
+test-licenses:
+  tags:
+    - docker
+  image: $PYTHON_IMAGE
+  needs: [get-version, test-build-package]
+  stage: test
+  script:
+    - pip3 install "dist/medicalmultitaskmodeling-${PKGVERSION}-py3-none-any.whl[all]" --extra-index-url https://gitlab.com/api/v4/groups/11254156/-/packages/pypi/simple
+    - pip3 install pip-licenses
+    # ignore false positives
+    # medicalmultitaskmodeling - self
+    # aiohappyeyeballs - PSF-2.0
+    # attrs - MIT
+    # referencing - MIT
+    # ignore cuda runtime libraries
+    - pip-licenses --output-file=licenses.txt --ignore-packages medicalmultitaskmodeling aiohappyeyeballs attrs referencing nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12
+    - cat licenses.txt
+    - cp licenses.txt licenses-$PKGVERSION.txt
+    - >
+      pip-licenses
+      --ignore-packages medicalmultitaskmodeling medicalmultitaskmodeling aiohappyeyeballs attrs referencing nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12
+      --allow-only="
+      3-Clause BSD License;
+      Apache 2.0;
+      Apache License 2.0;
+      Apache License v2.0;
+      Apache Software License;
+      BSD;
+      BSD 3-Clause;
+      BSD License;
+      CMU License (MIT-CMU);
+      FreeBSD;
+      GNU Library or Lesser General Public License (LGPL);
+      GNU Lesser General Public License v2 (LGPLv2);
+      Historical Permission Notice and Disclaimer (HPND);
+      ISC License (ISCL);
+      MIT;
+      MIT License;
+      Mozilla Public License 2.0 (MPL 2.0);
+      Python Software Foundation License;
+      Public Domain;
+      The Unlicense (Unlicense);
+      "
+  artifacts:
+    paths:
+      - licenses-$PKGVERSION.txt
+
 test-building-docs:
   image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
   stage: test
@@ -234,7 +293,14 @@ update-python-package:
   tags:
     - docker
   # Required because otherwise the environment variables are not available
-  needs: [test-no-extras, test-mtl-convergence, test-extra-api, test-extra-export, get-version]
+  needs:
+    [
+      test-no-extras,
+      test-mtl-convergence,
+      test-extra-api,
+      test-extra-export,
+      get-version,
+    ]
   before_script:
     - poetry config virtualenvs.in-project true
     - poetry config repositories.gitlab ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
@@ -269,7 +335,14 @@ update-python-package-public:
   stage: deploy
   tags:
     - docker
-  needs: [test-no-extras, test-mtl-convergence, test-extra-api, test-extra-export, get-version]
+  needs:
+    [
+      test-no-extras,
+      test-mtl-convergence,
+      test-extra-api,
+      test-extra-export,
+      get-version,
+    ]
   before_script:
     - poetry config virtualenvs.in-project true
     - poetry install --with deploy
