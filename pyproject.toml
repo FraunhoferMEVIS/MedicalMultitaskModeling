@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "MedicalMultitaskModeling"
-version = "1.0.4"
+version = "1.1.0"
 description = "Multitask learning framework for medical data"
 authors = [
     "Raphael Schäfer <jan.raphael.schaefer@mevis.fraunhofer.de>",

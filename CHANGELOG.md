@@ -2,11 +2,10 @@
 
 ## 1.1.0
 
+- Tissue Concepts model released! [link](https://www.sciencedirect.com/science/article/pii/S0010482524017062?via%3Dihub)
+- implement SurvivalPredictionTask time-to-event targets
+- introduce attention based multiple instance learning components: `CLAMReducer` and `AttentionPoolingReducer`
 - CachingSubCaseDS uses CachingSubCaseDSSampler to customize behaviour instead of function `decide_removal`.
-
-## 1.0.4
-
-- add attention pooling for `mmm.mtl_modules.shared_blocks.Grouper`
 
 ## 1.0.3
 
