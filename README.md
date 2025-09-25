@@ -40,6 +40,17 @@ with torch.inference_mode():
 
 For a quick start in **model training** or more advanced inference examples, see the "Quickstart Guide" below.
 
+## Using the UNICORN 1st place solution
+
+This project achieved first place in the first foundation model benchmark, UNICORN! To download and use the model:
+
+```python
+from mmm.labelstudio_ext.NativeBlocks import NativeBlocks, MMM_MODELS, UNICORN_ENCODER
+model = NativeBlocks(MMM_MODELS[UNICORN_ENCODER], device_identifier="cuda:0")
+```
+
+This model contains the patch encoder and decoder. The modules that enabled the model's strong performance in multidimensional image processing (3D and gigapixel) will be released soon!
+
 ## Quickstart Guide
 
 To begin training multi-task models, you can use our `quickstart.ipynb` getting started notebook.
