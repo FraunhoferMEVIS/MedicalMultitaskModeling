@@ -13,12 +13,13 @@ from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.utils import get_default_cachepath
 
 MMM_MODELS = {
+    "unicorn-encoder.pt.zip": "https://owncloud.fraunhofer.de/index.php/s/xCuGNebfWia5SEY/download",
     "encoder-1.0.4.pt.zip": "https://owncloud.fraunhofer.de/index.php/s/Q5o1uD5eHL7tr3X/download",
     "tc-nopanda.pt.zip": "https://owncloud.fraunhofer.de/index.php/s/2QyZUhWofWgThh7/download",
 }
 DEFAULT_MODEL = "encoder-1.0.4.pt.zip"
 TC_NOPANDA = "tc-nopanda.pt.zip"
-
+UNICORN_ENCODER = "unicorn-encoder.pt.zip"
 
 class NativeBlocks:
     """
