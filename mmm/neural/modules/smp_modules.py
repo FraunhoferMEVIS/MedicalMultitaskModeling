@@ -3,17 +3,19 @@ Modules wrapped from the segmentation models for PyTorch library
 """
 
 from __future__ import annotations
+
 import logging
 from typing import Literal
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from pydantic import Field
-
+from segmentation_models_pytorch.decoders.segformer.decoder import SegformerDecoder
 from segmentation_models_pytorch.decoders.unet.decoder import UnetDecoder
-from segmentation_models_pytorch.decoders.pan.decoder import PANDecoder
 
+from ..activations import ActivationFn, ActivationFunctionConfig
 from ..TorchModule import TorchModule
-from ..activations import ActivationFunctionConfig, ActivationFn
 
 
 class SMPUnetDecoder(nn.Module):
@@ -24,7 +26,7 @@ class SMPUnetDecoder(nn.Module):
     >>> from mmm.neural.modules.smp_modules import SMPUnetDecoder
     >>> B, out_channels_for_pixel, pyr_depth, pyr_stride = 4, 16, (3, 64, 256, 512, 1024, 2048), (1, 2, 4, 8, 16, 32)
     >>> test_pyramid = [torch.rand((B, d, 224 // s, 224 // s)) for d, s in zip(pyr_depth, pyr_stride)]
-    >>> dec = SMPUnetDecoder(SMPUnetDecoder.Config(pixel_embedding_dim=out_channels_for_pixel), pyr_depth, pyr_stride[-1])
+    >>> dec = SMPUnetDecoder(SMPUnetDecoder.Config(pixel_embedding_dim=out_channels_for_pixel), pyr_depth, pyr_stride)
     >>> dec(test_pyramid).shape
     torch.Size([4, 16, 224, 224])
     >>> assert True not in [c > dec.args.hidden_dim for c in dec.channels]  # use hidden_dim as the max number of channels
@@ -33,14 +35,17 @@ class SMPUnetDecoder(nn.Module):
     class Config(TorchModule):
         architecture: Literal["unetdecoder"] = "unetdecoder"
         pixel_embedding_dim: int = 16
-        hidden_dim: int = Field(96, description="The maximum depth of the decoder. Avoids excessive memory usage.")
+        hidden_dim: int = Field(
+            96,
+            description="The maximum depth of the decoder. Avoids excessive memory usage.",
+        )
         head_kernel_size: int = 3
         activation: ActivationFunctionConfig = ActivationFunctionConfig(fn_type=ActivationFn.GeLU)
 
         def build_instance(self, *args, **kwargs) -> SMPUnetDecoder:
-            return SMPUnetDecoder(self, enc_out_channels=args[0], encoder_output_stride=args[1])
+            return SMPUnetDecoder(self, enc_out_channels=args[0], encoder_output_strides=args[1])
 
-    def __init__(self, args: Config, enc_out_channels: list[int], encoder_output_stride: int) -> None:
+    def __init__(self, args: Config, enc_out_channels: list[int], encoder_output_strides: list[int]) -> None:
         super().__init__()
         self.args = args
         # Skip one channel because that is the raw input
@@ -56,7 +61,7 @@ class SMPUnetDecoder(nn.Module):
         )
         self.norm = nn.BatchNorm2d(num_features=self.args.pixel_embedding_dim)
         self.activation = args.activation.build_instance()
-        assert encoder_output_stride == 32
+        assert 32 % encoder_output_strides[-1] == 0
         logging.debug(f"Channels of {self.args.architecture} are {self.channels}")
         self.decoder = UnetDecoder(enc_out_channels, tuple(self.channels), n_blocks=len(self.channels))
 
@@ -67,36 +72,36 @@ class SMPUnetDecoder(nn.Module):
         return self.args.pixel_embedding_dim
 
     def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
-        hidden_map: torch.Tensor = self.decoder(*features)
+        hidden_map: torch.Tensor = self.decoder(features)
         return self.activation(self.norm(self.final_conv(hidden_map)))
 
 
-class SMPPyramidAttentionDecoderConfig(TorchModule):
-    architecture: Literal["pyramid_attention"] = "pyramid_attention"
-    decoder_channels: int = 32
+class SegFormer(nn.Module):
+    class Config(TorchModule):
+        architecture: Literal["segformer"] = "segformer"
+        decoder_channels: int = 256
+        upsampling_factor: int = Field(
+            default=4,
+            description="Original paper used 4. 4 means that the features map's is input-edge-size//4",
+        )
 
-    def build_instance(self, *args, **kwargs) -> SMPPyramidAttentionDecoder:
-        return SMPPyramidAttentionDecoder(self, enc_out_channels=args[0], encoder_output_stride=args[1])
-
-
-class SMPPyramidAttentionDecoder(nn.Module):
-    """
-    Wraps segmentation-models-pytorch's PAN decoder
-    """
+        def build_instance(self, *args, **kwargs) -> SegFormer:
+            return SegFormer(self, enc_out_channels=args[0], encoder_output_strides=args[1])
 
     def __init__(
         self,
-        args: SMPPyramidAttentionDecoderConfig,
+        args: Config,
         enc_out_channels: list[int],
-        encoder_output_stride: int,
+        encoder_output_strides: list[int],
     ) -> None:
         super().__init__()
         self.args = args
-
-        assert len(enc_out_channels) > 4, "By the time of writing, PAN uses the latest four levels"
-
-        assert encoder_output_stride == 32
-        self.decoder = PANDecoder(enc_out_channels, self.args.decoder_channels)
+        self.output_strides = encoder_output_strides
+        self.decoder = SegformerDecoder(
+            enc_out_channels,
+            encoder_depth=len(enc_out_channels) - 1,
+            segmentation_channels=args.decoder_channels,
+        )
 
     def get_upsampling_factor(self) -> int:
         return 4
@@ -105,4 +110,28 @@ class SMPPyramidAttentionDecoder(nn.Module):
         return self.args.decoder_channels
 
     def forward(self, features: list[torch.Tensor]):
-        return self.decoder(*features)
+        target_size = [dim // self.get_upsampling_factor() for dim in features[0].shape[2:]]
+        equal_channel_features = self.forward_fpn(features)
+        # Resize all features to the size of the largest feature
+        resized_features = [
+            F.interpolate(feature, size=target_size, mode="bilinear", align_corners=False)
+            for feature in equal_channel_features
+        ]
+        output = self.decoder.fuse_stage(torch.cat(resized_features, dim=1))
+        return output
+
+    def get_strides_fpn(self) -> list[int]:
+        return self.output_strides[1:]
+
+    def forward_fpn(self, features: list[torch.Tensor]) -> list[torch.Tensor]:
+        """
+        Forward pass that returns feature maps with identical channel numbers.
+        """
+        features = features[2:] if features[1].size(1) == 0 else features[1:]
+        features = features[::-1]  # reverse channels to start from head of encoder
+
+        equalchannel_features = []
+        for i, mlp_layer in enumerate(self.decoder.mlp_stage):
+            feature = mlp_layer(features[i])
+            equalchannel_features.append(feature)
+        return equalchannel_features

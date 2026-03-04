@@ -1,0 +1,32 @@
+.main-figure {
+    position: relative;
+}
+
+.full-size-image {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.image-highlighted {
+    border: 2px solid rgba(220, 20, 60, .95);
+    border-radius: 12px;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, .15);
+    transition: transform .3s, box-shadow .3s, border-color .3s
+}
+
+.overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+.image-gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(256px, 1fr));
+    overflow: auto;
+}
+
+.main-figure-caption {
+    text-align: center;
+}

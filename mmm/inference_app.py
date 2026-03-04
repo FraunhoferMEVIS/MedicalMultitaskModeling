@@ -1,85 +1,93 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any
+
+import importlib.metadata
 from pathlib import Path
-from pydantic import Field
-from pydantic_settings import BaseSettings
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin
+
+import logfire
+import redis
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 try:
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
-
-    from label_studio_sdk import Client
+    from fastapi.responses import FileResponse, RedirectResponse
 except ImportError:
     if not TYPE_CHECKING:
-        FastAPI, CORSMiddleware, Client = Any, Any, Any
+        FastAPI, CORSMiddleware, FileResponse, RedirectResponse = (None,) * 4
+    else:
+        raise  # Avoids errors in type checking tools
 
-from mmm.data_loading.DistributedPath import DistributedPath
-from mmm.labelstudio_ext.DLModel import DLModel
-from mmm.labelstudio_ext.LGBModel import LGBModel
-from mmm.labelstudio_ext.NativeBlocks import NativeBlocks, MMM_MODELS, DEFAULT_MODEL
-from mmm.labelstudio_ext.LabelstudioCredentials import LabelstudioCredentials
+from mmm.api.DLModel import DLModel
+from mmm.api.LSModel import LSModel
+from mmm.settings import mtl_settings
 
 
 class APISettings(BaseSettings):
-    class Config:
-        env_prefix = "MTLAPI_"
+    model_config = SettingsConfigDict(env_prefix="MMMAPI_")
 
-    modules_path: DistributedPath | str = MMM_MODELS[DEFAULT_MODEL]
-    labelstudio_base: str = "http://datanodefec:9505"
-    labelstudio_token: str = "1234567890"
     app_base: str = Field(
-        "http://localhost:8000",
+        default="http://localhost:8000",
         description="The base URL of this service",
     )
-    device_identifier: str = "cuda:0"
-    dlconfig: DLModel.Config = DLModel.Config()
-    lgbconfig: LGBModel.Config = LGBModel.Config()
 
     allow_cors: bool = True
 
 
-def build_app(settings: APISettings) -> FastAPI:
-    app = FastAPI()
+def build_app() -> FastAPI:
+    settings = APISettings()
+
+    dlmodel = DLModel(urljoin(settings.app_base, "/peft"))
+    lsmodel = LSModel(urljoin(settings.app_base, "/labelstudio"))
+
+    try:
+        mmm_version = importlib.metadata.version("medicalmultitaskmodeling")
+    except Exception as e:
+        logfire.error("Could not determine medicalmultitaskmodeling version: {error}", error=e)
+        mmm_version = "unknown"
+
+    app = FastAPI(
+        docs_url="/",
+        openapi_tags=dlmodel.get_openapi_tags() + lsmodel.get_openapi_tags(),
+        title="M3 (Medical Multitask Modeling) API",
+        description=f"""
+    See the SDK documentation for more information.
+
+    To get started, see the examples `m3-sdk/examples/...`.
+    """,
+        version=mmm_version,
+    )
+    logfire.configure(service_name="m3_api")
+    logfire.instrument_fastapi(app)
 
     if settings.allow_cors:
         app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
         )
-    app.settings = settings
 
-    creds = LabelstudioCredentials(url=settings.labelstudio_base, token=settings.labelstudio_token)
-    ls_client: Client = creds.build_client()
+    app.include_router(dlmodel.router, prefix="/peft")
+    app.include_router(lsmodel.router, prefix="/labelstudio")
 
-    nativeblocks = NativeBlocks(settings.modules_path, settings.device_identifier)
-    app.model = nativeblocks
-
-    dlmodel = DLModel(
-        settings.dlconfig,
-        ls_client,
-        urljoin(settings.app_base, "/dl"),
-        nativeblocks,
-    )
-    app.include_router(dlmodel.build_router(), prefix="/dl")
-
-    lgbmmodel = LGBModel(
-        settings.lgbconfig,
-        ls_client,
-        urljoin(settings.app_base, "/lgbm"),
-        nativeblocks,
-    )
-    app.include_router(lgbmmodel.build_router(), prefix="/lgbm")
+    @app.get("/docs", include_in_schema=False)
+    async def docs_redirect():
+        return RedirectResponse(url="/", status_code=307)
 
     @app.get("/status")
     async def status():
+        try:
+            kv_available = mtl_settings.kv.ping()
+        except redis.exceptions.ConnectionError:
+            kv_available = False
         return {
-            "client_status": ls_client.check_connection(),
-            "modules_path": settings.modules_path,
+            "kv_status": kv_available,
+            "kv_url": mtl_settings.redis_url,
         }
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def api_favicon():
+        return FileResponse(Path(__file__).parent.joinpath("resources").joinpath("api_favicon.png"))
 
     return app
 
@@ -87,6 +95,4 @@ def build_app(settings: APISettings) -> FastAPI:
 if __name__ == "__main__":
     import uvicorn
 
-    app = build_app(APISettings())
-
-    uvicorn.run("mmm.inference_api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(build_app(), host="0.0.0.0", port=8000, reload=True)

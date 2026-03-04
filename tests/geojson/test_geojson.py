@@ -1,11 +1,13 @@
-import pytest
 from typing import Callable, Tuple
 
-from mmm.data_loading.geojson import GeoAnno, AnnotationType, GeojsonRegionWindows
-from mmm.data_loading.geojson import NoUsefulWindowException
+import pytest
 
-from mmm.data_loading.geojson.utils import move_anno_to_origin
+from m3_sdk.geojson import GeoAnno, AnnotationType
+from mmm.data_loading.geojson import GeojsonRegionWindows, NoUsefulWindowException
 from mmm.data_loading.geojson.AnnoFilterConfig import AnnoFilterConfig
+from mmm.data_loading.geojson.utils import move_anno_to_origin
+
+from ..test_data import WSIS
 
 
 def test_rectangle_builder():
@@ -102,3 +104,7 @@ def test_randomized_geojson_region_windows_multilevel():
 
     # There are four level 1 windows and 1 level 2 window:
     assert len(windows) > 5
+    # from pathlib import Path
+    # import json
+
+    # Path("./test_explainability.geojson").write_text(json.dumps(geojson))

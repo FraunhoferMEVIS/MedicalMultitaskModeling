@@ -1,19 +1,20 @@
-import wandb
-from typing import Tuple, Literal, Any, Dict
-import torch
+from typing import Any, Dict, Literal, Tuple
+
 import numpy as np
-import torch.nn.functional as F
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import wandb
 from torchvision.utils import make_grid
 
-from .MTLTask import MTLTask
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
-from mmm.mtl_modules.shared_blocks.MTLDecoder import MTLDecoder
 from mmm.data_loading.MTLDataset import MTLDataset
 from mmm.data_loading.TrainValCohort import TrainValCohort
-
 from mmm.logging.type_ext import StepFeedbackDict, StepMetricDict
+from mmm.mtl_modules.shared_blocks.MTLDecoder import MTLDecoder
+from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
+
+from .MTLTask import MTLTask
 
 
 def _build_criterion(loss_type: Literal["l1", "l2", "bce"]) -> nn.Module:
@@ -107,7 +108,7 @@ class ImageGenerationTask(MTLTask):
         return loss, live_vis
 
     def _visualize_step(self, source_img, target_img, pred_img):
-        vis_n = min(self._takeout_vis_budget(), source_img.size(0))
+        vis_n = min(self.ask_for_visualization(), source_img.size(0))
         if vis_n <= 0:
             return {}
         shape = pred_img.shape[-2:]

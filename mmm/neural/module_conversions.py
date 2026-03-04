@@ -1,6 +1,7 @@
-import torch.nn as nn
-from typing import List, Any, get_type_hints, Dict, Callable, Type, Optional, TypeVar
 from inspect import signature
+from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, get_type_hints
+
+import torch.nn as nn
 
 
 def base_norm_replacement(oldnorm: nn.Module, replacements: Dict):

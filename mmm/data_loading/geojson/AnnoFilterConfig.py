@@ -1,10 +1,11 @@
 import logging
 import re
 from typing import Callable
-from pydantic import Field
-from mmm.BaseModel import BaseModel
 
-from .GeoAnno import GeoAnno
+from m3_sdk.geojson import GeoAnno
+from pydantic import Field
+
+from mmm.BaseModel import BaseModel
 
 
 class AnnoFilterConfig(BaseModel):

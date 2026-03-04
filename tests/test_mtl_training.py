@@ -1,12 +1,81 @@
-import pytest
 from typing import Callable, List, Tuple
-import torch
-from mmm.mtl_modules.MTLModule import MTLModule
-from mmm.optimization.MTLOptimizer import MTLOptimizer
 
-from mmm.trainer.MTLTrainer import MTLTrainer
-from mmm.utils import recursive_equality
+import pytest
+import torch
+import torchvision.transforms as transforms
+
+from mmm.data_loading.SemSegDataset import SemSegDataset
+from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
+from mmm.data_loading.synthetic.shape_dataset import CanvasConfig, ShapeDataset
+from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.mtl_modules.MTLModule import MTLModule
+from mmm.mtl_modules.shared_blocks.PyramidDecoder import PyramidDecoder
+from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
+from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.mtl_modules.tasks.SemSegTask import SemSegTask
+from mmm.optimization.MTLOptimizer import MTLOptimizer
 from mmm.trainer.Loop import TrainLoopConfig, ValLoopConfig
+from mmm.trainer.MTLTrainer import MTLTrainer
+from mmm.transforms import KeepOnlyKeysInDict
+from mmm.utils import recursive_equality
+
+from .test_mtloptimizer import default_optim_config
+from .test_shared_blocks import (
+    default_decoder_factory,
+    default_encoder_factory,
+    default_squeezer_factory,
+)
+
+
+@pytest.fixture
+def shape_semseg_cohort() -> TrainValCohort[SemSegDataset]:
+    shapes_train_ds = ShapeDataset(ShapeDataset.Config(N=400, canvas=CanvasConfig(canvas_size=(96, 96))))
+    shapes_val_ds = ShapeDataset(ShapeDataset.Config(N=100, canvas=CanvasConfig(canvas_size=(96, 96))))
+    base_transform = transforms.Compose([ShapeDataset.cohort_transform(), KeepOnlyKeysInDict(keys={"image", "label"})])
+    return TrainValCohort(
+        TrainValCohort.Config(batch_size=(8, 8), num_workers=0),
+        SemSegDataset(
+            shapes_train_ds,
+            class_names=["background"] + shapes_train_ds.get_class_names(),
+            src_transform=base_transform,
+        ),
+        SemSegDataset(
+            shapes_val_ds,
+            class_names=["background"] + shapes_val_ds.get_class_names(),
+            src_transform=base_transform,
+        ),
+    )
+
+
+@pytest.fixture
+def shape_segtask_factory(shape_semseg_cohort: TrainValCohort):
+    def shape_segtask(for_squeezer: Squeezer, for_decoder: PyramidDecoder, task_name="shapeseg") -> SemSegTask:
+        # shapes_train_ds = TransformedSubset(shapes_ds, transform=ShapeSegmentationDataset.semseg_transform())
+        mock_segtask = SemSegTask(
+            shape_semseg_cohort.datasets[0].class_names,
+            for_decoder,
+            for_squeezer,
+            SemSegTask.Config(
+                module_name=task_name,
+                encoder_key="encoder",
+                decoder_key="decoder",
+                squeezer_key="squeezer",
+            ),
+            shape_semseg_cohort,
+        )
+        return mock_segtask
+
+    return shape_segtask
+
+
+@pytest.fixture
+def task_factory() -> Callable[[str], MTLTask]:
+    def create_task(task_name: str) -> MTLTask:
+        t = ClassificationMockupDataset.build_classification_task(task_name, 8, 4)
+        t.cohort.prepare_epoch(0)
+        return t
+
+    return create_task
 
 
 @pytest.fixture
@@ -46,13 +115,15 @@ def mtl_semseg_trainer_factory(
     shape_segtask_factory,
     default_optim_config,
     default_encoder_factory,
+    default_squeezer_factory,
     default_decoder_factory,
     torch_device,
 ):
     def build_mtl_semseg_trainer(max_train_steps=5, max_val_steps=2, max_epochs=25):
         optim_config = MTLOptimizer.Config(optim_config=default_optim_config(), lr_scheduler_configs=[])
         enc = default_encoder_factory()
-        dec = default_decoder_factory(enc)
+        squeezer = default_squeezer_factory(enc)
+        dec = default_decoder_factory(enc, squeezer)
         trainer = MTLTrainer(
             MTLTrainer.Config(
                 max_epochs=max_epochs,
@@ -64,9 +135,9 @@ def mtl_semseg_trainer_factory(
             ),
             experiment_name="mtl_semseg_trainer_factory_fixture",
         )
-        trainer.add_shared_blocks([enc, dec])
+        trainer.add_shared_blocks([enc, dec, squeezer])
 
-        trainer.add_mtl_task(shape_segtask_factory(dec, task_name="shapesegtrain"))
+        trainer.add_mtl_task(shape_segtask_factory(squeezer, dec, task_name="shapesegtrain"))
 
         for t in trainer.mtl_tasks:
             t.cohort.prepare_epoch(0)
@@ -138,13 +209,6 @@ def test_checkpointing(mtl_semseg_trainer_factory: Callable):
             )
             == should_be_equal
         )
-        # else:
-        #     # Optimizers of MTLModules are used
-        #     for module1, module2 in shared_pairs + task_pairs:  # test only those optimizers used in training
-        #         assert (module1.optim.optimizer is not None) and (module2.optim.optimizer is not None)
-        #         assert recursive_equality(
-        #             module1.optim.optimizer.state_dict(),
-        #             module2.optim.optimizer.state_dict()) == should_be_equal
 
         # parameters
         for b1, b2 in all_modules:

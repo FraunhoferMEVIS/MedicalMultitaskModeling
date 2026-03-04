@@ -1,20 +1,19 @@
 from __future__ import annotations
-import warnings
-from tqdm.auto import tqdm
-import numpy as np
-from pydantic import Field, model_validator
-from typing import Optional, Literal, Iterable
-from mmm.BaseModel import BaseModel
-from typing import Optional, Tuple, Dict, Any, Generic, TypeVar, Callable
-import logging
 
+import warnings
+from typing import Any, Callable, Dict, Generic, Iterable, Literal, Optional, Tuple, TypeVar
+
+import logfire
 import torch
 import torch.multiprocessing as mp
+from pydantic import Field, model_validator
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
-from mmm.utils import unique_str_hash, get_default_cachepath
+from mmm.BaseModel import BaseModel
 from mmm.DataSplit import DataSplit
-from .MTLDataset import MTLDataset, DatasetStyle
+
+from .MTLDataset import DatasetStyle, MTLDataset
 
 DatasetType = TypeVar("DatasetType", bound=MTLDataset, covariant=True)
 
@@ -23,9 +22,6 @@ class TrainValCohort(Generic[DatasetType]):
     """
     Can be used to define a training cohort with a training and a validation dataset.
     It is used to create dataloaders.
-
-    By setting cache-foldername you allow the cohort to cache its datasets.
-    The cached values will appear in ML_DATA_CACHE/cache_key/*.pkl
     """
 
     class Config(BaseModel):
@@ -41,8 +37,7 @@ In case too many workers are requested the trainer will reduce the number of wor
 while keeping a minimum of one worker per task.
 """,
         )
-        pin_memory: bool = False
-        prefill_cache: bool = True
+        pin_memory: bool = True
 
         @model_validator(mode="before")
         @classmethod
@@ -56,56 +51,43 @@ while keeping a minimum of one worker per task.
         args: Config,
         train_ds: DatasetType,
         val_ds: DatasetType,
-        cache_foldername="",
+        for_task_name: str | None = None,
     ) -> None:
         self.args: TrainValCohort.Config = args
+        self.for_task_name: str | None = for_task_name
         self.datasets: Tuple[DatasetType, DatasetType] = (train_ds, val_ds)
         self.data_loaders: Tuple[Optional[DataLoader], Optional[DataLoader]] = (
             None,
             None,
         )
 
-        if cache_foldername:
-            ignore_keys_for_discoverability = [
-                "batch_size",
-                "pin_memory",
-                "shuffle_loaders",
-                "num_workers",
-                "prefill_cache",
-            ]  # , "cross_val_split_size"]
-            reidentification_args = self.args.dict().copy()
-            for key in ignore_keys_for_discoverability:
-                reidentification_args.pop(key)
-            logging.info(f"I think {cache_foldername} cache needs to be unique w.r.t. \n {reidentification_args}")
-            unique_config_hash = unique_str_hash(**reidentification_args)
-            self.cache_path = get_default_cachepath(folder_name=cache_foldername) / unique_config_hash
-            self.datasets[0].enable_caching(self.cache_path / "train")
-            self.datasets[1].enable_caching(self.cache_path / "val")
-        else:
-            self.cache_path = None
-
     def __repr_html__(self) -> str:
         return f"""
         <pre><code>{self.__repr__()}</pre></code>
         """
 
-    def _st_repr_(self) -> None:
-        from mmm.logging.st_ext import stw, st
-
+    def _st_repr_(self, st_prefix: str = "") -> None:
         # Streamlit would otherwise resample cross validation splits
         import streamlit as st
 
-        # with st.():
-        if st.sidebar.button(f"Run `prepare_epoch(epoch=0)`"):
-            self.prepare_epoch(epoch=0)
+        from mmm.logging.st_ext import st, stw
 
-        if split_name_selection := st.sidebar.selectbox("TrainOrVal", ["Training", "Validation"]):
+        if st.sidebar.button(f"Run `prepare_epoch(epoch=0)`", key=f"{st_prefix}prepare_epoch"):
+            self.prepare_epoch(epoch=0)
+        else:
+            if not self.for_task_name:
+                self.for_task_name = "streamlit_visualization"
+            self.push_batchsize_to_datasets()
+
+        if split_name_selection := st.sidebar.selectbox(
+            "TrainOrVal", ["Training", "Validation"], key=f"{st_prefix}split"
+        ):
             split_name: str = split_name_selection
         else:
             split_name: str = "Training"
         train_val_index = 0 if split_name == "Training" else 1
 
-        stw(self.datasets[train_val_index])
+        stw(self.datasets[train_val_index], st_prefix=f"{st_prefix}dataset_{split_name.lower()}")
 
     def __repr__(self) -> str:
         return (
@@ -131,10 +113,14 @@ while keeping a minimum of one worker per task.
     def build_iterator(self, data_split: DataSplit) -> Iterable:
         # Map-style datasets might have a different length every time
         if self.datasets[data_split.value].get_dataset_style() == DatasetStyle.MapStyle:
-            cur_len = len(self.datasets[data_split.value].src_ds)
+            cur_len = len(self.datasets[data_split.value].src_ds)  # type: ignore
             if cur_len > len(self.datasets[data_split.value]) * self.datasets[data_split.value].reduced_size:
-                logging.debug(
-                    f"Dataset {data_split} of {self} has grown from {len(self.datasets[data_split.value])} to {cur_len}."
+                logfire.debug(
+                    "Dataset {data_split} of {self} has grown from {previous_len} to {cur_len}.",
+                    data_split=data_split,
+                    self=self,
+                    previous_len=len(self.datasets[data_split.value]),
+                    cur_len=cur_len,
                 )
                 # Due to multiprocessing the worker keeps a copy of the old, shorter dataset. It needs to be terminated.
                 self.terminate_datasplit_workers(data_split)
@@ -167,15 +153,24 @@ while keeping a minimum of one worker per task.
         self.terminate_datasplit_workers(DataSplit.train)
         self.terminate_datasplit_workers(DataSplit.val)
 
+    def push_batchsize_to_datasets(self):
+        assert self.for_task_name is not None, "Set name for logging before pushing batch size to datasets"
+        train_batchsize, val_batchsize = self.args.batch_size  # type: ignore
+        assert train_batchsize is not None, "Train batch size must be set for pushing batch size to datasets"
+        assert val_batchsize is not None, "Validation batch size must be set for pushing batch size to datasets"
+        self.datasets[0].set_cohort_settings(
+            batch_size=train_batchsize, task_name=self.for_task_name, split_name="train"
+        )
+        if self.datasets[1] is not None:
+            self.datasets[1].set_cohort_settings(
+                batch_size=val_batchsize, task_name=self.for_task_name, split_name="val"
+            )
+
     def prepare_epoch(self, epoch: int):
         """
         The epoch might be used by child classes to seed splits for cross validation.
         """
-        # Caches do not need to be specific to temporary cross validation datasets
-        # because augmentations are not cached anyways
-        if (self.cache_path is not None) and self.args.prefill_cache:
-            self.datasets[0].prefill_cache()
-            self.datasets[1].prefill_cache()
+        self.push_batchsize_to_datasets()
 
         # If deterministic datasets are used, then dataloaders do not need to be renewed:
         if None in self.data_loaders:

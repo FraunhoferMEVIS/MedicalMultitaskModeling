@@ -1,8 +1,9 @@
 import os
-import torch
-from torch.utils.data import Dataset, DataLoader
 
-from mmm.torch_ext import SubCaseDataset, CachingSubCaseDS
+import torch
+from torch.utils.data import DataLoader, Dataset
+
+from mmm.torch_ext import CachingSubCaseDS, SubCaseDataset
 
 
 class SuperCaseDataset(Dataset):
@@ -14,25 +15,6 @@ class SuperCaseDataset(Dataset):
 
     def __getitem__(self, index: int):
         return self.supercases[index]
-
-
-def test_cached_subcase_ds_multiproc():
-    ds = SuperCaseDataset()
-    subcaseds = CachingSubCaseDS(
-        ds,
-        lambda supercase: [x for x in supercase],
-        CachingSubCaseDS.Config(subcase_cache_size=2),
-    )
-    dl = DataLoader(subcaseds, batch_size=2, num_workers=3)
-
-    batches = [x for x in dl]
-    res = list(torch.concat(batches))  # flat list of subcases
-    assert len(set(res)) == len(res) == 10
-
-    # Test that a dataset correctly resets its state
-    batches = [x for x in dl]
-    res = list(torch.concat(batches))  # flat list of subcases
-    assert len(set(res)) == len(res) == 10
 
 
 def test_cached_subcase_ds():

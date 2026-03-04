@@ -1,28 +1,33 @@
 from __future__ import annotations
-from typing import Any, Dict, Tuple
-
-import torchvision.transforms.functional as F
 
 from torch.utils.data import Dataset
 
-from mmm.logging.st_ext import blend_with_mask
 from .MTLDataset import MTLDataset, SrcCaseType
 
 
 class RegressionDataset(MTLDataset):
     def __init__(self, src_ds: Dataset[SrcCaseType], *args, **kwargs) -> None:
-        super().__init__(src_ds, ["image", "target"], ["meta"], *args, **kwargs)
+        super().__init__(src_ds, *args, **kwargs)
 
-    def verify_case_by_index(self, index: int) -> Dict[str, Any]:
-        case = super().verify_case_by_index(index)
+    @staticmethod
+    def get_mandatory_keys() -> list[str]:
+        return super(RegressionDataset, RegressionDataset).get_mandatory_keys() + ["image", "target"]
+
+    def verify_case(self, case):
+        super().verify_case(case)
         self.assert_image_data_assumptions(case["image"])
-        return case
+        # targets should be of type float
+        assert isinstance(case["target"], float), "Target should be of type float"
+
+        if "meta" in case and "event" in case["meta"]:
+            assert isinstance(case["meta"]["event"], int), "Event should be of type int"
+            assert case["meta"]["event"] in [0, 1], "Event should be either 1 if event happened or 0 if not"
 
     def get_input_output_tuple(self, batch: Dict[str, Any]) -> Tuple[Any, ...]:
         return batch["image"], batch["target"]
 
     def st_case_viewer(self, case: Dict[str, Any], index: int = -1) -> None:
-        import streamlit as st
+        from mmm.logging.st_ext import blend_with_mask, st
 
         st.write(f"Target: {case['target']}")
         im = case["image"]
@@ -33,7 +38,7 @@ class RegressionDataset(MTLDataset):
         return batch["image"].shape[0]
 
     def _visualize_batch_case(self, batch: Dict[str, Any], i: int) -> None:
-        import streamlit as st
+        from mmm.logging.st_ext import blend_with_mask, st
 
         patch = batch["image"][i]
         st.write(f"Target: {batch['target'][i]}")

@@ -1,10 +1,11 @@
 import numpy as np
+
 from mmm.event_selectors import (
+    CodedEventSelector,
+    CombinedEventSelector,
     EventSelectorBase,
     FixedEventSelector,
     RecurringEventSelector,
-    CodedEventSelector,
-    CombinedEventSelector,
 )
 
 

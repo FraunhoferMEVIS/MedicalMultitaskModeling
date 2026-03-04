@@ -1,20 +1,15 @@
-from typing import Literal, List, Optional
-from pydantic import Field
+from typing import List, Literal, Optional
+
 import torch
 import torch.nn as nn
 import torchvision.models as torch_models
-from torchvision.models.convnext import (
-    ConvNeXt,
-    ConvNeXt_Tiny_Weights,
-    LayerNorm2d,
-    ConvNeXt_Small_Weights,
-)
+from pydantic import Field
+from torchvision.models.convnext import ConvNeXt, ConvNeXt_Small_Weights, ConvNeXt_Tiny_Weights, LayerNorm2d
 
-from mmm.torch_ext import infer_stride_channels_from_features
-from mmm.neural.TorchModule import TorchModule
 from mmm.mtl_modules.shared_blocks import SharedBlock
-from mmm.neural.activations import ActivationFunctionConfig, ActivationFn
-from mmm.torch_ext import replace_childen_recursive
+from mmm.neural.activations import ActivationFn, ActivationFunctionConfig
+from mmm.neural.TorchModule import TorchModule
+from mmm.torch_ext import infer_stride_channels_from_features, replace_childen_recursive
 
 
 def replace_with_defaultnorm(old_norm: LayerNorm2d):

@@ -2,13 +2,14 @@
 Configurable datatypes for selecting iterations in a loop for something to happen.
 """
 
+import math
+import random
 from abc import abstractmethod
 from typing import List, Literal, Union
-from mmm.BaseModel import BaseModel
-from pydantic import validator
 
-import random
-import math
+from pydantic import field_validator
+
+from mmm.BaseModel import BaseModel
 
 
 class EventSelectorBase(BaseModel):
@@ -40,10 +41,11 @@ class CodedEventSelector(EventSelectorBase):
     selector_type: Literal["coded"] = "coded"
     python_program: str = r"i % random.randint(2, 8) == 0"
 
-    @validator("python_program")
-    def must_be_valid_program(cls, _):
+    @field_validator("python_program")
+    def must_be_valid_program(cls, value):
         res = cls._execute_prog(0)
         assert isinstance(res, bool), "program must execute to bool"
+        return value
 
     def _execute_prog(self, iteration: int):
         return eval(self.python_program, {"i": iteration, "random": random, "math": math})

@@ -1,180 +1,98 @@
-[tool.poetry]
+[project]
 name = "MedicalMultitaskModeling"
-version = "1.1.0"
-description = "Multitask learning framework for medical data"
+version = "1.6.0"
+description = "Multitask learning for medical data"
 authors = [
-    "Raphael Schäfer <jan.raphael.schaefer@mevis.fraunhofer.de>",
-    "Till Nicke <till.nicke@mevis.fraunhofer.de>",
+    { name = "Raphael Schäfer", email = "jan.raphael.schaefer@mevis.fraunhofer.de" },
+    { name = "Till Nicke", email = "till.nicke@mevis.fraunhofer.de" },
 ]
-license = "All rights reserved."
+requires-python = ">=3.10"
 readme = "README.md"
-packages = [{ include = "mmm" }]
-include = [{ path = "**/*.jinja2", format = ["sdist", "wheel"] }]
-homepage = "https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling"
-repository = "https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling"
-
-[tool.poetry.scripts]
-mmm = "mmm.app:app"
-
-[tool.poetry.urls]
-"Issue Tracker" = "https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling/issues"
-
-[tool.poetry.dependencies]
-python = ">=3.10,<3.12"
-torch = "^2.1.2"
-torchvision = "^0.16.2"
-scikit-learn = "^1.3.1"
-numpy = "^1.26.1"
-pydantic = "^2.4.2"
-tqdm = "^4.66.1"
-imageio = "^2.31.5"
-pandas = "^2.1.1"
-monai = "^1.3.0"
-deepdiff = "^6.6.1"
-opencv-python = "^4.8.1.78"
-patchify = "^0.2.3"
-rasterio = "^1.3.9"
-shapely = "^2.0.2"
-tiffslide = "^2.2.0"
-torchinfo = "^1.8.0"
-json5 = "^0.9.14"
-pydantic-settings = "^2.0.3"
-minio = "^7.1.17"
-# Extras for fsspec: https://github.com/fsspec/filesystem_spec/blob/master/pyproject.toml
-fsspec = { version = "^2024.3.1", extras = ["s3"] }
-universal-pathlib = "^0.2.2"
-
-
-# Optional dependencies which are used in extra groups, maintained by hand
-# By design of Poetry, these cannot be specified using optional dependency groups!
-# In other words, place them in the main dependencies but as optional!
-
-# Api
-fastapi = { extras = ["all"], version = "^0.110.2", optional = true }
-aiohttp = { version = "^3.9.0", optional = true }
-lightgbm = { version = "^4.1.0", optional = true }
-label-studio-converter = { version = "^0.0.58", optional = true }
-label-studio-sdk = { version = "^0.0.34", optional = true }
-# Export
-onnx = { version = "^1.13.1", optional = true }
-onnxruntime = { version = "^1.14.1", optional = true }
-# Interactive
-plotly = { version = "^5.17.0", optional = true }
-ipywidgets = { version = "^8.1.1", optional = true }
-ipykernel = { version = "^6.25.2", optional = true }
-matplotlib = { version = "^3.8.0", optional = true }
-seaborn = { version = "^0.13.0", optional = true }
-streamlit = { version = "^1.33.0", optional = true }
-nbformat = { version = "^5.9.2", optional = true }
-nbconvert = { version = "^7.16.1", optional = true }
-# Testing
-pytest = { version = "^8.0.0", optional = true }
-pytest-cov = { version = "^4.0.0", optional = true }
-black = { version = "^23.1.0", optional = true }
-isort = { version = "^5.10.1", optional = true }
-sphinx = { version = "^7.3.7", optional = true }
-autodoc-pydantic = { version = "^2.2.0", optional = true }
-# Detection
-mmdet = { version = "^3.2.0", optional = true }
-nibabel = "^5.2.1"
-wsi-service = { version = "^0.12.14", source = "empaia", optional = true }
-typer = ">=0.9.0"
-toml = "^0.10.2"
-segmentation-models-pytorch = "^0.3.3"
-click-repl = { version = "^0.3.0", optional = true }
-wandb = "^0.18.3"
-albumentations = "^1.4.17"
-# Survival
-lifelines = "^0.29.0"
-
-[tool.poetry.group.deploy]
-optional = true
-[tool.poetry.group.deploy.dependencies]
-build = "^0.10.0"
-twine = "^4.0.2"
-
-[tool.poetry.extras]
-all = [
-    "fastapi",
-    "click-repl",
-    "aiohttp",
-    "lightgbm",
-    "label-studio-converter",
-    "label-studio-sdk",
-    "wsi-service",
-    "celery",
-    "mmdet",
-    "plotly",
-    "ipywidgets",
-    "ipykernel",
-    "matplotlib",
-    "seaborn",
-    "streamlit",
-    "nbformat",
-    "nbconvert",
-    "black",
-    "plotly",
-    "ipywidgets",
-    "ipykernel",
-    "matplotlib",
-    "seaborn",
-    "nbformat",
-    "nbconvert",
-    "black",
-    "pytest",
-    "pytest-cov",
-    "black",
-    "isort",
-    "sphinx",
-    "autodoc-pydantic",
-    "onnx",
-    "onnxruntime",
-    "lifelines",
-    "scikit-survival",
+license = { file = "license.md" }
+dependencies = [
+    "torch>=2.1.2,<3",
+    "torchvision",
+    "scikit-learn>=1.3.1,<2",
+    "tqdm>=4.66.1,<5",
+    "imageio>=2.31.5,<3",
+    "pandas>=2.1.1,<3",
+    "monai>=1.3.0,<2",
+    "deepdiff>=6.6.1,<7",
+    "torchinfo>=1.8.0,<2",
+    "json5>=0.9.14,<0.10",
+    "minio>=7.1.17,<8",
+    "einops>=0.8.0,<0.9",
+    "timm>=1.0.15,<2",
+    "nibabel>=5.2.1,<6",
+    "typer>=0.9.0",
+    "toml>=0.10.2,<0.11",
+    "segmentation-models-pytorch>=0.5.0,<0.6",
+    "wandb>=0.23.0",
+    "albumentations>=2.0.0",
+    "logfire[fastapi,celery]>=4.13.2",
+    "redis"
 ]
+
+[project.optional-dependencies]
 api = [
-    "fastapi",
-    "aiohttp",
-    "lightgbm",
-    "label-studio-converter",
+    "fastapi[standard]",
+    "aiohttp>=3.9.0,<4",
     "label-studio-sdk",
-    "wsi-service",
-    "celery",
+    "celery[redis, msgpack]>=5.5.3,<6",
 ]
-# mmcv is not available on PyPI, therefore the user needs to install it manually
-detection = ["mmdet"]
-survival = ["lifelines", "scikit-survival"]
+detection = ["mmdet>=3.3.0,<4"]
+survival = ["lifelines>=0.30.0,<0.31"]
 interactive = [
     "plotly",
     "ipywidgets",
     "ipykernel",
     "matplotlib",
     "seaborn",
-    "streamlit",
+    "streamlit>=1.51.0",
     "nbformat",
     "nbconvert",
-    "black",
-    "click-repl", # typer itself is not optional on purpose
+    "black[jupyter]==23.12.1",
 ]
 testing = [
     "pytest",
     "pytest-cov",
-    "black",
-    "isort",
-    "sphinx",
-    "autodoc-pydantic",
 ]
-export = ["onnx", "onnxruntime"]
+export = [
+    "onnx",
+    # "onnxruntime",
+    "onnxscript"
+]
 
-[[tool.poetry.source]]
+[project.urls]
+Repository = "https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling"
+Issues = "https://github.com/FraunhoferMEVIS/MedicalMultitaskModeling/issues"
+
+[project.scripts]
+m3 = "mmm.app:app"
+
+[dependency-groups]
+deploy = [
+    "build>=0.10.0,<0.11",
+    "twine>=4.0.2,<5",
+]
+
+[[tool.uv.index]]
 name = "PyPI"
-priority = "primary"
+url = "https://pypi.org/simple/"
+default = true
 
-[[tool.poetry.source]]
-name = "empaia"
-url = "https://gitlab.com/api/v4/groups/11254156/-/packages/pypi/simple"
-priority = "supplemental"
+[tool.hatch.build.targets.sdist]
+include = [
+    "mmm",
+    "**/*.jinja2",
+]
+
+[tool.hatch.build.targets.wheel]
+include = [
+    "mmm",
+    "**/*.jinja2",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"

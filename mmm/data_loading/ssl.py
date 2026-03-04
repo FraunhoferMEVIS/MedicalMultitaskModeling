@@ -4,22 +4,20 @@ Collection of Cohorts and Datasets for Self-supervised Tasks
 
 from __future__ import annotations
 
-import torch
-from typing import Any, Callable, Dict, List, Iterator, Optional
-from torch.utils.data import Dataset
-import torchvision.transforms as transforms
 import random
+from typing import Any, Callable, Dict, Iterator, List, Optional
+
 import numpy as np
 import PIL
-
+import torch
+import torchvision.transforms as transforms
 from torch.utils.data import Dataset, IterableDataset
-from mmm.transforms import ApplyToKey
-from mmm.logging.st_ext import side_by_side
-from mmm.data_loading.MTLDataset import MTLDataset
+
 from mmm.data_loading.ClassificationDataset import ClassificationDataset
+from mmm.data_loading.MTLDataset import MTLDataset
 from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.torch_ext import combine_datasets
-from mmm.augmentations import SimCLRPatchAug, get_contrastive_2D_augs
+from mmm.transforms import ApplyToKey
 
 
 class SSLDSWrapper(IterableDataset):
@@ -120,13 +118,6 @@ class SSLDataset(MTLDataset):
 
             yield d
 
-    def st_case_viewer(self, case: Dict[str, Any], index: int) -> None:
-        import streamlit as st
-
-        st.title("SSL view")
-        side_by_side(case["image"], case["target"])
-        st.write(case)
-
 
 class AETrainValCohort(TrainValCohort[SSLDataset]):
     class Config(TrainValCohort.Config):
@@ -224,15 +215,17 @@ def get_combined_SSL_dataset(list: List[MTLDataset], src_transform, input_transf
 
 if __name__ == "__main__":
     import os
-    from mmm.logging.st_ext import multi_cohort_explorer
-    import streamlit as st
-    import pydantic
     from pathlib import Path
+
+    import pydantic
+    import streamlit as st
+
+    from mmm.data_loading.medical.conic import ConicSemSegTrainValCohort
     from mmm.data_loading.medical.histo_patchclassification import (
         Kather100kClassificationCohort,
         Kather100kClassificationCohortConfig,
     )
-    from mmm.data_loading.medical.conic import ConicSemSegTrainValCohort
+    from mmm.logging.st_ext import multi_cohort_explorer
 
     def create_ae_cohort(cfg, lst):
         return AETrainValCohort(cfg, lst)

@@ -1,43 +1,40 @@
-import logging
-from pathlib import Path
-import random
 import json
-
-from pydantic import Field
-import torch
-import torch.nn as nn
-from typing import Any, Dict, Tuple, List, cast, Optional
+import logging
+import random
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import numpy as np
+import torch
+import torch.nn as nn
 import wandb
-from mmm.logging.type_ext import StepFeedbackDict, StepMetricDict
-from .MTLTask import MTLTask
+from pydantic import Field
+
 from mmm.data_loading.DetectionDataset import DetectionDataset, eval_map_batch
 from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.logging.type_ext import StepFeedbackDict, StepMetricDict
+from mmm.mmm_types.GroupUsage import GroupingStrategy, GroupUsage, MaskingStrategy
+from mmm.mtl_modules.shared_blocks.FCOSDecoder import FCOSDecoder
+from mmm.mtl_modules.shared_blocks.Grouper import Grouper, make_grid_for_supercase
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 
+from .MTLTask import MTLTask
+
 try:
-    from mmdet.models.utils import multi_apply
     from mmdet.models.dense_heads import FCOSHead
-    from mmengine.structures import InstanceData
+    from mmdet.models.utils import multi_apply
     from mmengine.config import ConfigDict
+    from mmengine.structures import InstanceData
 except ImportError:
     logging.warning(
-        """Detection extra dependencies are not installed. Only required for Detection tasks and related components.
-Please install MMCV manually, as it is not available on PyPI."""
+        "Detection extras are not installed. For detection, install MMCV manually, as it is not available on PyPI."
     )
     FCOSHead = nn.Module
     InstanceData = Any
 
 
 class MTLFCOSHead(FCOSHead):
-    #     def _init_predictor(self) -> None:
-    #         """Initialize predictor layers of the head."""
-    #         self.conv_cls = nn.Conv2d(
-    #             self.feat_channels, self.cls_out_channels, 3, padding=1)
-    #         self.conv_reg = nn.Conv2d(self.feat_channels, 4, 3, padding=1)
-
     def forward_single(self, cls_feat, reg_feat, scale, stride: int):
         for cls_layer in self.cls_convs:
             cls_feat = cls_layer(cls_feat)
@@ -170,6 +167,14 @@ class MMDetectionTask(MTLTask):
         encoder_key: str = "encoder"
         decoder_key: str = "fcosfpn"
         squeezer_key: str = "squeezer"
+        grouper_key: GroupUsage = Field(
+            default=GroupUsage(grouper_key="", masking=MaskingStrategy.fullattention),
+            description="If set, a shared Grouper is used, and the mixer specified by mixer_key will be used.",
+        )
+        mixer_key: str = Field(
+            default="",
+            description="If set, a shared FeatureMixer is used. The grouper_key must be set as well.",
+        )
         min_threshold_for_metrics: float = Field(
             default=0.05,
             description="Threshold after which confidence score boxes are considered in metric computation",
@@ -181,10 +186,11 @@ class MMDetectionTask(MTLTask):
         conv_bias: bool = True
         stacked_convs: int = 0
         dcn_on_last_conv: bool = False
-        # head_kernel_size: int = Field(
-        #     default=3,
-        #     description="Boxes and classes are predicted with this kernel size."
-        # )
+        multiscale_invariance: bool = Field(
+            default=True,
+            description="""If no multiscale invariance is required, the detection task can use segmentation features.
+Multiscale invariance uses an FPN.""",
+        )
 
     def __init__(
         self,
@@ -196,25 +202,32 @@ class MMDetectionTask(MTLTask):
         super().__init__(args, cohort)
         self.args: MMDetectionTask.Config
         self.class_names = cohort.datasets[0].vis_classes
+        assert self.args.grouper_key.grouping is GroupingStrategy.full
 
         self.good_thres: Optional[float] = None
 
-        self.strides = for_strides
-        logging.debug(f"Setting up mmDetection task, fpn strides: {for_strides}")
+        self.strides = for_strides if self.args.multiscale_invariance else [for_strides[0]]
+        logging.debug(f"Setting up mmDetection task, {self.strides=}")
 
         # I think feature channels are configurable, in_channels need to be the same as the output of the neck
+        min_fac = 5  # reproduces regress ranges of the original FCOS implementation if 5 strides are used
+        fpn_regress_ranges = [
+            (-1 if i == min_fac else 2**i, 2 ** (i + 1) if i < len(self.strides) + min_fac - 1 else 1e8)
+            for i in range(min_fac, min_fac + len(self.strides))
+        ]
         fcos_head: MTLFCOSHead = MTLFCOSHead(
             num_classes=len(self.class_names),
+            regress_ranges=fpn_regress_ranges,
             in_channels=in_channels,
             stacked_convs=args.stacked_convs,
             feat_channels=in_channels,
-            strides=for_strides,
+            strides=self.strides,
             loss_cls=dict(
                 type="FocalLoss",
                 use_sigmoid=True,
                 gamma=2.0,
                 alpha=0.25,
-                loss_weight=1 / np.log(len(self.class_names)),
+                loss_weight=(1 / np.log(len(self.class_names))) if len(self.class_names) > 1 else 1.0,
             ),
             loss_bbox=dict(type="IoULoss", loss_weight=1.0),
             loss_centerness=dict(type="CrossEntropyLoss", use_sigmoid=True, loss_weight=0.2),
@@ -240,19 +253,44 @@ class MMDetectionTask(MTLTask):
                 "head": fcos_head
             }
         )
+        self.flatten = nn.Flatten(1)
         # The normalization factor might be computable
 
     def get_head(self) -> MTLFCOSHead:
         return cast(MTLFCOSHead, self.task_modules["head"])
 
-    def forward(self, x: Any, shared_blocks: Dict[str, SharedBlock]):
+    def forward(self, inputs: Any, shared_blocks: Dict[str, SharedBlock]):
+        x, supercase_indexes, contexts = inputs if len(inputs) == 3 else (inputs[0], inputs[1], None)
+
         pyr = shared_blocks[self.args.encoder_key](x)
 
         # for Backward compatibility
         if hasattr(self.args, "squeezer_key") and self.args.squeezer_key in list(shared_blocks.keys()):
-            pyr[-1], _ = shared_blocks[self.args.squeezer_key](pyr)
+            pyr[-1], hidden_vector = shared_blocks[self.args.squeezer_key](pyr)
 
-        cls_features, reg_features = shared_blocks[self.args.decoder_key](pyr)
+        if self.args.grouper_key.grouper_key:
+            hidden_vector = self.flatten(hidden_vector)
+            if hasattr(self.args, "positions") and self.args.positions is not None:
+                positions = [c[self.args.positions[0]] for c in contexts]
+            else:
+                positions = None
+            hidden_vector, self._grouper_meta = shared_blocks[self.args.grouper_key.grouper_key](
+                hidden_vector, supercase_indexes, self.args.grouper_key, positions=positions
+            )
+
+        if self.args.mixer_key:
+            assert self.args.grouper_key.grouper_key
+            mixer = shared_blocks[self.args.mixer_key]
+            pyr = mixer(hidden_vector, pyr, supercase_indexes)
+
+        if isinstance(decoder := shared_blocks[self.args.decoder_key], FCOSDecoder):
+            assert self.args.multiscale_invariance, "FCOSDecoder can only be used with multiscale invariance"
+            cls_features, reg_features = decoder.forward(pyr)
+        else:
+            segmentation_features = (
+                decoder.forward_fpn(pyr)[::-1] if self.args.multiscale_invariance else [decoder.forward(pyr)]
+            )
+            cls_features, reg_features = segmentation_features, segmentation_features
         cls_score, bbox_pred, centerness = self.task_modules["head"].forward(cls_features, reg_features)
         return cls_score, bbox_pred, centerness
 
@@ -303,16 +341,23 @@ class MMDetectionTask(MTLTask):
             )
             metas.append(d["meta"] if "meta" in d else {})
 
-        cls_score, bbox_pred, centerness = shared_blocks.forward(torch.stack(images), self.forward)
+        supercase_indices = Grouper.extract_ids_from_batch(
+            [x.get("group_id", None) for x in metas], for_task_name=self.get_name()
+        ).to(self.torch_device)
 
-        losses: Dict = self.get_head().loss_by_feat(
-            cls_scores=cls_score,
-            bbox_preds=bbox_pred,
-            centernesses=centerness,
-            batch_gt_instances=targets,
-            # batch_img_metas=[],  # Unused in their implementation of FCOS [d.img_meta for d in targets]
-            # batch_gt_instances_ignore=None
+        cls_score, bbox_pred, centerness = shared_blocks.forward(
+            (torch.stack(images), supercase_indices, [x.get("context") for x in metas]), self.forward
         )
+
+        with torch.cuda.amp.autocast(enabled=False):  # disable autocast to be able to cast types here
+            losses: Dict = self.get_head().loss_by_feat(
+                cls_scores=[x.float() for x in cls_score],
+                bbox_preds=bbox_pred,
+                centernesses=centerness,
+                batch_gt_instances=targets,
+                # batch_img_metas=[],  # Unused in their implementation of FCOS [d.img_meta for d in targets]
+                # batch_gt_instances_ignore=None
+            )
         cls_loss, box_loss, centerness_loss = (
             losses["loss_cls"],
             losses["loss_bbox"],
@@ -327,23 +372,9 @@ class MMDetectionTask(MTLTask):
             boxes_foreach_image = self.features_to_boxes(
                 cls_score, bbox_pred, centerness, [d.metainfo for d in targets]
             )  # scores, boxes, labels
-            # import pdb
-            # pdb.set_trace()
-            vis_n = min(self._takeout_vis_budget(), len(images))
-            if vis_n > 0:
-                img_index = random.randint(0, len(images) - 1)
-
-                # boxes_foreach_image[img_index]
-                wandb_img = self.visualize_prediction(
-                    images[img_index].cpu(),
-                    targets[img_index].bboxes.cpu(),
-                    targets[img_index].labels.cpu(),
-                    boxes_foreach_image[img_index].bboxes.cpu(),
-                    boxes_foreach_image[img_index].scores.cpu(),
-                    boxes_foreach_image[img_index].labels.cpu(),
-                    metas[img_index],
-                )
-                real_time_feedback["preds"] = wandb_img
+            real_time_feedback.update(
+                self.visualize_case(images, supercase_indices, targets, boxes_foreach_image, metas)
+            )
 
             filter_by_score = [
                 img_preds_bboxes.scores > self.args.min_threshold_for_metrics
@@ -351,15 +382,15 @@ class MMDetectionTask(MTLTask):
             ]
 
             pred_boxes = [
-                img_preds_bboxes.bboxes[boxfilter, ...].clone().cpu().numpy()
+                img_preds_bboxes.bboxes[boxfilter, ...].clone().cpu().float().numpy()
                 for boxfilter, img_preds_bboxes in zip(filter_by_score, boxes_foreach_image)
             ]
             pred_scores = [
-                img_preds_bboxes.scores[boxfilter].clone().cpu().numpy()
+                img_preds_bboxes.scores[boxfilter].clone().cpu().float().numpy()
                 for boxfilter, img_preds_bboxes in zip(filter_by_score, boxes_foreach_image)
             ]
             pred_labels = [
-                img_preds_bboxes.labels[boxfilter].clone().cpu().numpy()
+                img_preds_bboxes.labels[boxfilter].clone().cpu().float().numpy()
                 for boxfilter, img_preds_bboxes in zip(filter_by_score, boxes_foreach_image)
             ]
 
@@ -374,7 +405,39 @@ class MMDetectionTask(MTLTask):
         return final_loss, real_time_feedback
 
     @torch.no_grad()
-    def visualize_prediction(
+    def visualize_case(self, images, supercase_indices, targets, boxes_foreach_image, metas) -> dict[str, Any]:
+        vis_n = min(self.ask_for_visualization(), len(images))
+        if vis_n <= 0:
+            return {}
+
+        grid_img, weight_str, vis_indices, with_annos = make_grid_for_supercase(
+            torch.stack(images).cpu(),
+            supercase_indices,
+            supercase_index := random.choice(supercase_indices),
+            self._grouper_meta if hasattr(self, "_grouper_meta") else None,
+            with_boxes=dict(
+                gtboxes=[{"bboxes": d.bboxes.cpu().clone(), "labels": d.labels.cpu().clone()} for d in targets],
+                predboxes=[
+                    {"bboxes": b.bboxes.cpu().clone(), "scores": b.scores.cpu().clone(), "labels": b.labels.cpu()}
+                    for b in boxes_foreach_image
+                ],
+            ),
+        )
+
+        wandb_img = self.visualize_prediction_single(
+            grid_img,
+            torch.cat([x["bboxes"] for x in with_annos["boxes"]["gtboxes"]]),
+            torch.cat([x["labels"] for x in with_annos["boxes"]["gtboxes"]]),
+            torch.cat([x["bboxes"] for x in with_annos["boxes"]["predboxes"]]),
+            torch.cat([x["scores"] for x in with_annos["boxes"]["predboxes"]]),
+            torch.cat([x["labels"] for x in with_annos["boxes"]["predboxes"]]),
+            [metas[i] for i in vis_indices],
+            extra=f"supercase {supercase_index} {weight_str} {[metas[i].get('context') for i in vis_indices]}",
+        )
+        return {"preds": wandb_img}
+
+    @torch.no_grad()
+    def visualize_prediction_single(
         self,
         img: torch.Tensor,
         img_boxes: List,
@@ -383,6 +446,7 @@ class MMDetectionTask(MTLTask):
         pred_scores: List,
         pred_labels: List,
         meta: Dict,
+        extra: str = "",
     ) -> wandb.Image:
         gt_boxes = [
             {
@@ -427,7 +491,7 @@ class MMDetectionTask(MTLTask):
                     "box_data": gt_boxes,
                 },
             },
-            caption=f"{np.min(img.numpy()):.3f}, {np.max(img.numpy()):.3f}\n{img.shape}\n{metastr}",
+            caption=f"{np.min(img.numpy()):.3f}, {np.max(img.numpy()):.3f}\n{img.shape}\n{metastr}\n{extra}",
         )
         return im
 
@@ -473,25 +537,6 @@ class MMDetectionTask(MTLTask):
 
         metrics, logstring = super().log_epoch_metrics()
         # assert self.args.score_threshold_for_metrics is not None
-
-        # if self.training:
-        #     if self.good_thres is None:
-        #         thresholds = self.determine_thresholds(list(np.arange(self.args.min_threshold_for_metrics, 0.9, 0.1)))
-        #     else:
-        #         proposals = list(filter(lambda x: 0.95 >= x >= self.args.min_threshold_for_metrics, [
-        #             self.good_thres - 0.05,
-        #             self.good_thres,
-        #             self.good_thres + 0.05,
-        #         ]))
-        #         thresholds = self.determine_thresholds(proposals)
-
-        #     best_threshold = max(thresholds, key=lambda k: thresholds[k][0])
-        #     self.good_thres = best_threshold
-        # else:
-        #     if self.good_thres is None:
-        #         thresholds = self.determine_thresholds([self.args.min_threshold_for_metrics])
-        #     else:
-        #         thresholds = self.determine_thresholds([self.good_thres])
 
         thresholds = self.determine_thresholds([self.args.min_threshold_for_metrics])
         best_threshold = max(thresholds, key=lambda k: thresholds[k][0])

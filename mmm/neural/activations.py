@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import Callable
+
 import torch.nn as nn
 
 from mmm.neural.TorchModule import TorchModule

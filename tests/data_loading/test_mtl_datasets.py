@@ -1,7 +1,8 @@
 import pytest
+
+from mmm.data_loading.MTLDataset import InvalidCaseError
 from mmm.data_loading.RegressionDataset import RegressionDataset
 from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
-from mmm.data_loading.MTLDataset import InvalidCaseError
 
 
 def test_verification_fail():

@@ -1,30 +1,30 @@
 from __future__ import annotations
-from abc import abstractmethod
-import os
+
 import logging
-
+import os
+from abc import abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Literal, Union
-from typing_extensions import Annotated
-from mmm.BaseModel import BaseModel
-from pydantic import Field
+from typing import Any, Dict, List, Literal, Optional, Union
 
+import logfire
 import numpy as np
 import torch
-import torch.optim as optim
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
-    LambdaLR,
-    ExponentialLR,
-    ReduceLROnPlateau,
-)
-from torch.distributed.optim import ZeroRedundancyOptimizer
-import torch.distributed as dist
 
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
+# Try to import GradScaler from torch.amp (newer versions), fallback to torch.cuda.amp (older versions)
+try:
+    from torch.amp import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
+import torch.distributed as dist
+import torch.optim as optim
+from pydantic import Field
+from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, LambdaLR, ReduceLROnPlateau
+from typing_extensions import Annotated
+
+from mmm.BaseModel import BaseModel
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
-
 
 TorchLRScheduler = Union[optim.lr_scheduler._LRScheduler, ReduceLROnPlateau]
 
@@ -194,6 +194,8 @@ class MTLOptimizer:
             default=1.0,
             description="Scales the learning rate of the task optimizers relative to the global learning rate.",
         )
+        precision: Literal["fp32", "fp16", "bf16"] = "fp32"
+        grad_clip: float = 1.0
 
     def __init__(
         self,
@@ -204,43 +206,69 @@ class MTLOptimizer:
     ) -> None:
         self.args = args
         self.gradient_scale_factor = gradient_scale_factor
-        msg = "Setting up Optimizer for: "
+        with logfire.span("Setting up Optimizer"):
+            # Parameter are a list of dictionaries, where each dictionary correspond to an MTLModule
+            # Each dictionary can contain extra info such as a custom learning rate for that MTLModule
+            ps: List[Dict[str, Any]] = []
+            for k, shared_block in shared_blocks.items():  # type: ignore
+                ps.append(
+                    {
+                        "initial_lr": self.args.optim_config.lr,
+                        "params": (k_params := list(shared_block.parameters())),
+                    }
+                )
+                logfire.info(
+                    "Wiring up optimizer for shared block {block_name} with {num_params} parameter groups",
+                    block_name=k,
+                    num_params=len(k_params),
+                )
 
-        # Parameter are a list of dictionaries, where each dictionary correspond to an MTLModule
-        # Each dictionary can contain extra info such as a custom learning rate for that MTLModule
-        ps: List[Dict[str, Any]] = []
-        for k, shared_block in shared_blocks.items():
-            ps.append(
-                {
-                    "initial_lr": self.args.optim_config.lr,
-                    "params": list(shared_block.parameters()),
-                }
-            )
-            msg = f"{msg} block:{k}"
+            self.optimizer: ZeroRedundancyOptimizer | optim.Optimizer
+            if dist.is_initialized():
+                self.optimizer = ZeroRedundancyOptimizer(
+                    ps,
+                    optimizer_class=self.args.optim_config.get_type(),
+                    **self.args.optim_config.get_params(),
+                )
+                logfire.info("Detected distributed training, using ZeroRedundancyOptimizer for shared parameters")
+            else:
+                self.optimizer = self.args.optim_config.get_type()(ps, **self.args.optim_config.get_params())
+                logfire.info("Using regular optimizer for shared parameters because of no distributed training")
 
-        if dist.is_initialized():
-            self.optimizer: optim.Optimizer = ZeroRedundancyOptimizer(
-                ps,
-                optimizer_class=self.args.optim_config.get_type(),
-                **self.args.optim_config.get_params(),
+            self.schedulers = [c.build_instance(self.optimizer, max_epochs) for c in self.args.lr_scheduler_configs]
+            self.task_optims: dict[str, optim.Optimizer] = {}
+            # A list which contains the names of the tasks which still have UNUSED gradients in the current step
+            self.still_has_gradient: list[str] = []
+            self.scaler = torch.GradScaler(device="cuda", enabled=self.args.precision != "fp32")
+            self.forward_context = torch.autocast(
+                device_type="cuda",
+                enabled=self.args.precision != "fp32",
+                dtype=self.dtype_from_string(self.args.precision),
             )
+            logfire.info(
+                "Setting up mixed precision training {enabled} with precision {precision} and device {device}",
+                enabled=self.scaler.is_enabled(),
+                precision=self.forward_context.fast_dtype,
+                device=self.forward_context.device,
+            )
+
+    @staticmethod
+    def dtype_from_string(precision: str) -> torch.dtype:
+        if precision == "fp32":
+            return torch.float32
+        elif precision == "fp16":
+            return torch.float16
+        elif precision == "bf16":
+            return torch.bfloat16
         else:
-            self.optimizer: optim.Optimizer = self.args.optim_config.get_type()(
-                ps, **self.args.optim_config.get_params()
-            )
-
-        self.schedulers = [c.build_instance(self.optimizer, max_epochs) for c in self.args.lr_scheduler_configs]
-        self.task_optims: dict[str, optim.Optimizer] = {}
-        # A list which contains the names of the tasks which still have UNUSED gradients in the current step
-        self.still_has_gradient: list[str] = []
-        logging.info(msg)
+            raise ValueError(f"Unknown precision string: {precision}")
 
     def add_task(self, task: MTLTask) -> None:
         """
         Adds a new task's optimizable parameters. Cannot check if the task already exists.
         """
         assert task.get_name() not in list(self.task_optims.keys()), f"{self} already knows {task.get_name()}"
-        task_optim_config = self.args.optim_config.model_copy()
+        task_optim_config = self.args.optim_config.model_copy(deep=True)
         task_optim_config.lr = task_optim_config.lr * self.args.lr_factor_tasks
         task_optim = self.args.optim_config.get_type()(task.parameters(), **task_optim_config.get_params())
         self.task_optims[task.get_name()] = task_optim
@@ -249,9 +277,18 @@ class MTLOptimizer:
         # We do not want the memory to accumulate with the number of tasks in a step -> set_to_none=True
         self.optimizer.zero_grad(set_to_none=True)
 
+    def run_backward(self, loss: torch.Tensor):
+        self.scaler.scale(loss).backward()
+
     def after_backward(self, of_task: MTLTask, reduce_task_immediately: bool):
         if reduce_task_immediately:
-            self.task_optims[of_task.get_name()].step()
+            self.scaler.unscale_(self.task_optims[of_task.get_name()])
+
+            if self.args.grad_clip > 0.0:
+                # Only clip the task's gradients!
+                torch.nn.utils.clip_grad_norm_(of_task.parameters(), self.args.grad_clip)
+
+            self.scaler.step(self.task_optims[of_task.get_name()])
             # The docs mention that in that case steps might be skipped if gradients are set to none, beware!
             # In a multi-task setting, not all shared blocks might be used in every step resulting in skipped steps.
             self.task_optims[of_task.get_name()].zero_grad(set_to_none=True)
@@ -260,6 +297,13 @@ class MTLOptimizer:
                 self.still_has_gradient.append(of_task.get_name())
 
     def after_iteration_step(self):
+        """
+        Called for parameter updates of the shared modules, and optionally for tasks that were not updated immediately.
+
+        It does not perform zero_grad for the shared blocks's optimizer (self.optimizer).
+        This happens in reset_shared_grads
+        """
+        self.scaler.unscale_(self.optimizer)
         # Gradients are averaged across all processes or at least nodes by DDP
         # We want to compensate for that by multiplying all shared parameter's gradients with the global_world_size
         # This only needs to be applied to the shared parameters, as the parameters of the tasks are optimized locally.
@@ -275,12 +319,23 @@ class MTLOptimizer:
                 not dist.is_initialized()
             ), "Scale factor is 1.0 while using DDP. Gradient scaling should be done with DDP."
 
-        self.optimizer.step()
+        if self.args.grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(
+                (p for group in self.optimizer.param_groups for p in group["params"]), self.args.grad_clip
+            )
+
+        self.scaler.step(self.optimizer)
 
         for task_with_unused_grad in self.still_has_gradient:
-            # logging.info(f"Task {task_with_unused_grad} still has unused gradients. Performing step.")
-            self.task_optims[task_with_unused_grad].step()
+            # if self.args.precision != "fp32":
+            #     raise NotImplementedError("This branch is untested, scaler needs to be used")
+            # self.task_optims[task_with_unused_grad].step()
+            self.scaler.step(self.task_optims[task_with_unused_grad])
             self.task_optims[task_with_unused_grad].zero_grad(set_to_none=True)
+
+        # scaler.update should only be called once, after all optimizers used this iteration have been stepped
+        self.scaler.update()
+
         self.still_has_gradient = []
 
     def after_loop_step(
@@ -316,40 +371,53 @@ class MTLOptimizer:
             res[f"lr{i}"] = param_group["lr"]
         return res
 
+    def shared_state_to_dict(self) -> dict:
+        res: dict[str, Any] = {
+            "optim": self.optimizer.state_dict(),
+        }
+        if self.schedulers:
+            res["schedulers"] = [s.state_dict() for s in self.schedulers]
+
+        return res
+
+    def load_shared_state_from_dict(self, state: dict) -> None:
+        self.optimizer.load_state_dict(state["optim"])
+        if self.schedulers:
+            for scheduler, state in zip(self.schedulers, state["schedulers"]):
+                scheduler.load_state_dict(state)
+
     def create_checkpoint(self, folder_path: Path, rank: int) -> None:
         if dist.is_initialized():
+            assert isinstance(self.optimizer, ZeroRedundancyOptimizer)
             self.optimizer.consolidate_state_dict()
         if rank == 0:
             if not folder_path.exists():
                 os.mkdir(folder_path)
-            torch.save(self.optimizer.state_dict(), folder_path / "optim.ckpt")
-            if self.schedulers:
-                assert self.schedulers is not None
-                torch.save(
-                    [s.state_dict() for s in self.schedulers],
-                    folder_path / "schedulers.ckpt",
-                )
+            torch.save(self.shared_state_to_dict(), folder_path / "optim.ckpt")
 
         if dist.is_initialized():
             dist.barrier()
         # Save checkpoints of the tasks
         for task_name, task_optim in self.task_optims.items():
-            logging.debug(f"Saving optimizer checkpoint for task {task_name}")
+            logfire.info("Saving optimizer checkpoint for task {task_name}", task_name=task_name)
             torch.save(task_optim.state_dict(), folder_path / f"optim_{task_name}.ckpt")
 
     def load_checkpoint(self, folder_path: Path) -> None:
         for task_name, task_optim in self.task_optims.items():
-            logging.debug(f"Loading optimizer checkpoint for task {task_name}")
+            logfire.info("Loading optimizer checkpoint for task {task_name}", task_name=task_name)
             task_optim.load_state_dict(torch.load(folder_path / f"optim_{task_name}.ckpt"))
-        self.optimizer.load_state_dict(torch.load(folder_path / "optim.ckpt"))
+        shared_blocks_state = torch.load(folder_path / "optim.ckpt")
+        self.optimizer.load_state_dict(shared_blocks_state["optim"])
         if self.schedulers:
-            schedulers_path = folder_path / "schedulers.ckpt"
-            if schedulers_path.exists():
+            # schedulers_path = folder_path / "schedulers.ckpt"
+            # if schedulers_path.exists():
+            if "schedulers" in shared_blocks_state:
                 try:
-                    states = torch.load(schedulers_path)
-                    for scheduler, state in zip(self.schedulers, states):
+                    for scheduler, state in zip(self.schedulers, shared_blocks_state["schedulers"]):
                         scheduler.load_state_dict(state)
                 except:
-                    logging.warn(f"Checkpoint {schedulers_path} not valid for LR schedulers: {self.schedulers}")
+                    logging.warning(
+                        f"Checkpoint {shared_blocks_state.keys()} not valid for LR schedulers: {self.schedulers}"
+                    )
             else:
-                logging.warn(f"No state found for LR schedulers: {self.schedulers}")
+                logging.warning(f"No state found for LR schedulers: {self.schedulers}")

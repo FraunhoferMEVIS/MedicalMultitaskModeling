@@ -1,14 +1,16 @@
-import random
-from urllib.parse import urljoin
-import pickle
 import os
-from pathlib import Path
+import pickle
+import random
 import time
-import requests
-import numpy as np
-from typing import Dict, Optional, Any, OrderedDict, Tuple, Literal
+from pathlib import Path
+from typing import Any, Dict, Literal, Optional, OrderedDict, Tuple
+from urllib.parse import urljoin
+
 import imageio.v3 as imageio
+import numpy as np
+import requests
 from urllib3.exceptions import InsecureRequestWarning
+
 from mmm.utils import get_default_cachepath, unique_str_hash
 
 requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)  # type: ignore

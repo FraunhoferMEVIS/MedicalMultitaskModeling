@@ -1,37 +1,19 @@
-import random
-from typing import Literal, Iterable
-from pydantic import Field
 import itertools
+import random
+from typing import Iterable
 
-from shapely.geometry import Polygon
+from m3_sdk.geojson import GeoAnno
+from m3_sdk.models import GeojsonRegionWindows as SDKGeojsonRegionWindows
 from shapely import GEOSException
+from shapely.geometry import Polygon
 
-from mmm.BaseModel import BaseModel
-
-from .GeoAnno import GeoAnno
 from .NoUsefulWindowException import NoUsefulWindowException
 
 
-class GeojsonRegionWindows(BaseModel):
+class GeojsonRegionWindows(SDKGeojsonRegionWindows):
     """
     Yields subwindows inside annotated regions given as coarse polygons.
     """
-
-    min_area: float = Field(
-        default=0.95,
-        description="Area of a window that is required to be inside the annotated region. 0.95 for 95%",
-    )
-    patch_size: tuple[int, int] = 224, 224
-    coordinate_augmentation: Literal["random", "none"] = "random"
-    windowsize_augmentation: Literal["relative", "none"] = "relative"
-    augmentation_strength: float = Field(
-        default=0.2,
-        description="Controls the windowsize augmentation. Should be smaller than 1.",
-    )
-    stepsize: int = Field(
-        default=2,
-        description="Controls the stepsize. For one moves one window at a time, for 2 it moves half a window every step",
-    )
 
     def augment_window(self, x_raw, y_raw, l0_window_width, l0_window_height):
         """
@@ -87,11 +69,14 @@ class GeojsonRegionWindows(BaseModel):
         }
 
         # It does not make sense if a window is larger than the region annotation itself
-        useful_window_sizes = {k: v for k, v in window_sizes.items() if v[0] * v[1] <= anno.shape.area}
-        if not useful_window_sizes:
-            raise NoUsefulWindowException(
-                f"Annotation did not have a useful window in levels {level_downsamples}: {anno}"
-            )
+        if self.filter_large_levels:
+            useful_window_sizes = {k: v for k, v in window_sizes.items() if v[0] * v[1] <= anno.shape.area}
+            if not useful_window_sizes:
+                raise NoUsefulWindowException(
+                    f"Annotation did not have a useful window in levels {level_downsamples}: {anno.shape.area}", anno
+                )
+        else:
+            useful_window_sizes = window_sizes
         proposal_coords = {}
         for l, (l0_window_width, l0_window_height) in useful_window_sizes.items():
             xcoords = list(
@@ -111,13 +96,14 @@ class GeojsonRegionWindows(BaseModel):
 
             # Itertools.product does not yield random combinations, so a list conversion is necessary
             cs = list(itertools.product(xcoords, ycoords))
-            random.shuffle(cs)
+            if self.shuffle_coordinates_and_levels:
+                random.shuffle(cs)
             proposal_coords[l] = (coord for coord in cs)
 
         valid_levels: list[int] = list(useful_window_sizes.keys())
         # current_level_idx = 0  # in first iteration it will be 0
         while valid_levels:
-            selected_level = random.choice(valid_levels)
+            selected_level = random.choice(valid_levels) if self.shuffle_coordinates_and_levels else valid_levels[0]
             try:
                 # selected_level = valid_levels[current_level_idx]
                 x_raw, y_raw = next(proposal_coords[selected_level])

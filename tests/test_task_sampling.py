@@ -1,27 +1,39 @@
+from typing import List, Type, get_args
+
 import pytest
-from typing import List, get_args, Type
 import torch
 from torch.utils.data import Dataset
 
-from mmm.mtl_modules.tasks.MTLTask import MTLTask
-from mmm.data_loading.TrainValCohort import TrainValCohort
-from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
-from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
 from mmm.data_loading.ClassificationDataset import ClassificationDataset
+from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
+from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.DataSplit import DataSplit
+from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
+from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
+from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
 from mmm.mtl_modules.tasks.ClassificationTask import ClassificationTask
+from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.neural.modules.simple_cnn import MiniConvNet
+from mmm.optimization.MTLOptimizer import MTLOptimizer
 from mmm.task_sampling import (
+    BalancedTaskSampler,
     BaseSampler,
     ConcatTaskSampler,
-    BalancedTaskSampler,
     CyclicTaskSampler,
+    TaskSamplerConfig,
+    TaskSamplerTypes,
 )
-from mmm.task_sampling import TaskSamplerConfig, TaskSamplerTypes
-from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
-from mmm.DataSplit import DataSplit
-from mmm.trainer.Loop import Loop, LoopConfig, TrainLoopConfig
-from mmm.optimization.MTLOptimizer import MTLOptimizer
-from mmm.neural.modules.simple_cnn import MiniConvNet
-from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
+from mmm.trainer.Loop import Loop, TrainLoopConfig
+
+
+@pytest.fixture
+def list_of_tasks():
+    ts = []
+    for name, train_n, val_n in [("t1", 4, 2), ("t2", 6, 2), ("t3", 6, 2)]:
+        t = ClassificationMockupDataset.build_classification_task(name, train_n, val_n)
+        t.cohort.prepare_epoch(0)
+        ts.append(t)
+    yield ts
 
 
 @pytest.fixture(params=[samplerconfig for samplerconfig in get_args(TaskSamplerConfig)])
@@ -30,10 +42,7 @@ def default_tasksampler_config(request):
 
 
 def test_concat_task_sampler():
-    ts: List[MTLTask] = [
-        ClassificationMockupDataset.build_classification_task(name, train_n, val_n)
-        for name, train_n, val_n in [("t1", 4, 2), ("t2", 5, 2)]
-    ]  # type: ignore
+    ts: List[MTLTask] = [ClassificationMockupDataset.build_classification_task(name, train_n, val_n) for name, train_n, val_n in [("t1", 4, 2), ("t2", 5, 2)]]  # type: ignore
 
     for t in ts:
         t.cohort.prepare_epoch(0)
@@ -66,8 +75,6 @@ def test_cyclic_task_sampler_infinite(wandb_run):
             self.accesses.append(index)
             return {"image": torch.rand(3, 28, 28), "class": index}
 
-    # g = iter(sampler)
-
     enc = PyramidEncoder(PyramidEncoder.Config(model=MiniConvNet.Config()))
     squeezer = Squeezer(
         Squeezer.Config(),
@@ -85,7 +92,7 @@ def test_cyclic_task_sampler_infinite(wandb_run):
             # class_names=random_classnames,
             args=ClassificationTask.Config(module_name=f"ds{i}"),
             cohort=TrainValCohort(
-                TrainValCohort.Config(batch_size=(2, 2), num_workers=1),
+                TrainValCohort.Config(batch_size=(2, 2), num_workers=0),
                 train_ds=ClassificationDataset(ds, class_names=random_classnames),
                 val_ds=ClassificationDataset(ds, class_names=random_classnames),
             ),

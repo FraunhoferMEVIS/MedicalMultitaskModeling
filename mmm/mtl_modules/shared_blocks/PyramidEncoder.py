@@ -1,18 +1,19 @@
 from pathlib import Path
-from typing import List, Mapping, Sequence, cast, Union
-from typing_extensions import Annotated
+from typing import List, Mapping, Sequence, Union, cast
 
-from pydantic import Field
 import torch
 import torch.nn as nn
+from pydantic import Field
+from typing_extensions import Annotated
 
 from mmm.neural.model_protocols import EncoderModel
-from .SharedBlock import SharedBlock
 from mmm.neural.modules.simple_cnn import MiniConvNet
 from mmm.neural.modules.simple_linear import SimpleLinearNet
-from mmm.neural.modules.TorchVisionCNN import TorchVisionCNN
 from mmm.neural.modules.swinformer import TorchVisionSwinformer
 from mmm.neural.modules.TimmEncoder import TimmEncoder
+from mmm.neural.modules.TorchVisionCNN import TorchVisionCNN
+
+from .SharedBlock import SharedBlock
 
 EncoderArchitectureType = Union[
     MiniConvNet.Config,
@@ -85,7 +86,8 @@ class PyramidEncoder(SharedBlock):
         return feature_pyramid
 
     def get_example_input(self):
-        return torch.rand(1, self.get_feature_pyramid_channels()[0], 224, 224).to(self.torch_device)
+        # Swin only works for 256x256 with ONNX
+        return (torch.rand(1, self.get_feature_pyramid_channels()[0], 256, 256).to(self.torch_device),)
 
     def get_input_names(self) -> Sequence[str]:
         return ["input"]
@@ -109,8 +111,3 @@ class PyramidEncoder(SharedBlock):
                 for i, stride in enumerate(self.get_strides()[1:])
             },
         }
-
-    def export_to_onnx(self, path: Path, for_task: str = "") -> None:
-        if self.args.model.architecture == "swinformer":
-            raise NotImplementedError("ONNX export is not supported for Swinformer")
-        return super().export_to_onnx(path, for_task)

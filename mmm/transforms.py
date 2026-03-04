@@ -1,3 +1,4 @@
+import itertools
 import logging
 import random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -7,12 +8,14 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as F
-from mmm.BaseModel import BaseModel
-from mmm.data_loading.geojson import GeoAnno, GeojsonRegionWindows
-from mmm.logging.type_ext import TransformsSeqType
-from mmm.utils import make_divisable_by
 from pydantic import Field
 from torchvision.models.detection.transform import resize_boxes
+
+from mmm.BaseModel import BaseModel
+from mmm.data_loading.geojson import GeoAnno, GeojsonRegionWindows
+from mmm.data_loading.geojson.NoUsefulWindowException import NoUsefulWindowException
+from mmm.logging.type_ext import TransformsSeqType
+from mmm.utils import make_divisable_by
 
 
 class TupleToDict:
@@ -241,16 +244,18 @@ class MaskedPatchExtractor:
             default=0.1,
             description="Jiggle the H, W and coordinates of the patch by a maximum of this factor.",
         )
-        max_patches: Optional[int] = None
+        max_patches: int | None = None
 
     def __init__(
         self,
         args: Config,
         patchfilter: Optional[Callable] = None,
-        mask_key: str = "label",
+        mask_key: str | None = "label",
+        with_boxes: bool = False,
     ):
         self.args = args
         self.mask_key = mask_key
+        self.with_boxes = with_boxes
         self.patchfilter = patchfilter
 
         self.min_patch_size = min(args.patch_sizes)
@@ -264,27 +269,95 @@ class MaskedPatchExtractor:
 
     def apply(self, d: Dict) -> Iterable[Dict[str, Any]]:
         img: torch.Tensor = d["image"]
-        mask: torch.Tensor = d[self.mask_key]
+        mask: torch.Tensor | None = d[self.mask_key] if self.mask_key is not None else None
 
-        rect = GeoAnno.rectangle_builder((0, 0), (mask.shape[-2], mask.shape[-1]))
+        rect = GeoAnno.rectangle_builder((0, 0), (img.shape[-2], img.shape[-1]))
 
         pseudo_levels = {i: patchsize / self.min_patch_size for i, patchsize in enumerate(self.args.patch_sizes)}
         g = self.regionextractor.iter_valid_windows(rect, pseudo_levels)
-        for i, (level, xy, hw) in enumerate(g):
-            hw_scaled = hw[0] * pseudo_levels[level], hw[1] * pseudo_levels[level]
-            patchmeta = {"level": level, "xy": xy, "hw": hw_scaled, "i": i}
+        try:
+            for i, (level, xy, hw) in enumerate(itertools.islice(g, self.args.max_patches)):
+                hw_scaled = hw[0] * pseudo_levels[level], hw[1] * pseudo_levels[level]
+                patchmeta = {"level": level, "xy": xy, "hw": hw_scaled, "i": i}
 
-            x1 = max(0, int(xy[0]))
-            x2 = min(mask.shape[-2], int(xy[0] + hw_scaled[0]))
-            y1 = max(0, int(xy[1]))
-            y2 = min(mask.shape[-1], int(xy[1] + hw_scaled[1]))
+                x1 = max(0, int(xy[0]))
+                x2 = min(img.shape[-2], int(xy[0] + hw_scaled[0]))
+                y1 = max(0, int(xy[1]))
+                y2 = min(img.shape[-1], int(xy[1] + hw_scaled[1]))
+                res = {
+                    "image": img[:, x1:x2, y1:y2],
+                    "meta": {"patchmeta": patchmeta},
+                }
+                if mask is not None:
+                    res[self.mask_key] = mask[..., x1:x2, y1:y2]
+                if self.with_boxes:
+                    if d["boxes"].shape[0] == 0:
+                        res["boxes"] = d["boxes"]
+                        res["labels"] = d["labels"]
+                    else:
+                        boxes_within_patch = []
+                        labels_within_patch = []
+                        for box_i in range(d["boxes"].shape[0]):
+                            coords = d["boxes"][box_i]
+                            box_xsize = coords[2] - coords[0]
+                            box_ysize = coords[3] - coords[1]
+
+                            # If at least half of the box is within the patch, keep it
+                            if in_patch := (
+                                False
+                                not in [
+                                    coords[0] >= y1 - (box_xsize * 0.5),
+                                    coords[1] >= x1 - (box_ysize * 0.5),
+                                    coords[2] <= y2 + (box_xsize * 0.5),
+                                    coords[3] <= x2 + (box_ysize * 0.5),
+                                ]
+                            ):
+                                boxes_within_patch.append(
+                                    torch.tensor(
+                                        [
+                                            max(coords[0] - y1, 0),
+                                            max(coords[1] - x1, 0),
+                                            min(coords[2] - y1, y2 - y1),
+                                            min(coords[3] - x1, x2 - x1),
+                                        ],
+                                        dtype=torch.float32,
+                                    )
+                                )
+                                labels_within_patch.append(d["labels"][box_i])
+                        res["boxes"] = (
+                            torch.stack(boxes_within_patch)
+                            if len(boxes_within_patch) > 0
+                            else torch.empty((0, 4), dtype=torch.float32)
+                        )
+                        res["labels"] = (
+                            torch.tensor(labels_within_patch)
+                            if len(labels_within_patch) > 0
+                            else torch.empty((0,), dtype=torch.int64)
+                        )
+                if "meta" in d:
+                    res["meta"]["supermeta"] = d["meta"]
+                    if "group_id" in d["meta"]:
+                        res["meta"]["group_id"] = d["meta"]["group_id"]
+                if self.patchfilter is None or self.patchfilter(res):
+                    yield res
+        except NoUsefulWindowException as e:
+            # If the image is smaller than the smallest patch size, just yield the image
+            # if img.shape[-2] < self.min_patch_size or img.shape[-1] < self.min_patch_size:
             res = {
-                "image": img[:, x1:x2, y1:y2],
-                self.mask_key: mask[..., x1:x2, y1:y2],
-                "meta": {"patchmeta": patchmeta},
+                "image": img,
+                "meta": {
+                    "patchmeta": {"level": 0, "xy": (0, 0), "hw": (img.shape[-2], img.shape[-1]), "i": 0},
+                },
             }
+            if self.mask_key is not None:
+                res[self.mask_key] = mask
+            if self.with_boxes:
+                res["boxes"] = d["boxes"]
+                res["labels"] = d["labels"]
             if "meta" in d:
                 res["meta"]["supermeta"] = d["meta"]
+                if "group_id" in d["meta"]:
+                    res["meta"]["group_id"] = d["meta"]["group_id"]
             if self.patchfilter is None or self.patchfilter(res):
                 yield res
 
@@ -294,7 +367,7 @@ def flatten_list(lst: List[List[Any]]) -> List[Any]:
 
 
 def _case_to_aformat(
-    d: Dict[str, Any]
+    d: Dict[str, Any],
 ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[List[float]], Optional[List[int]]]:
     aimg = (d["image"] * 255.0).permute(1, 2, 0).numpy().astype(np.uint8)
     amask = d["label"].numpy() if "label" in d else None
@@ -305,7 +378,7 @@ def _case_to_aformat(
     if aboxes is not None and alabels is not None:
         invalid_box = [b[0] >= b[2] or b[1] >= b[3] for b in aboxes]
         if True in invalid_box:
-            logging.warning(f"Invalid box found in {d['meta']}")
+            logging.debug(f"Invalid box found in {d['meta']}")
             aboxes = [b for i, b in enumerate(aboxes) if not invalid_box[i]]
             alabels = [l for i, l in enumerate(alabels) if not invalid_box[i]]
     return aimg, amask, amasks, aboxes, alabels
@@ -328,14 +401,23 @@ class Alb:
     We use pascal_voc format for boxes. Augmentation might change the number of boxes and labels.
     """
 
-    def __init__(self, transforms: TransformsSeqType, support_boxes=False) -> None:
+    def __init__(self, transforms: TransformsSeqType, support_boxes=False, replay_for_groups=False) -> None:
+        self.replay_for_groups = replay_for_groups
         box_kwargs = (
             {"bbox_params": A.BboxParams(format="pascal_voc", label_fields=["class_labels"])} if support_boxes else {}
         )
-        self.transform = A.Compose(
-            transforms,
-            **box_kwargs,
-        )
+        if self.replay_for_groups:
+            self.transform = A.ReplayCompose(
+                transforms,
+                **box_kwargs,
+            )
+            self._group_id = None
+            self._replaydata = None
+        else:
+            self.transform = A.Compose(
+                transforms,
+                **box_kwargs,
+            )
 
     def __call__(self, d: Dict[str, Any]) -> Dict[str, Any]:
         aimg, amask, amasks, aboxes, alabels = _case_to_aformat(d)
@@ -349,7 +431,25 @@ class Alb:
         ]:
             if kwarg_value is not None:
                 transform_kwargs[kwarg_name] = kwarg_value
-        transformed = self.transform(**transform_kwargs)
+
+        if self.replay_for_groups:
+            group_id = d["meta"]["group_id"] if "meta" in d and "group_id" in d["meta"] else None
+            if self._replaydata is None or group_id is None or group_id != self._group_id:
+                transformed = self.transform(**transform_kwargs)
+
+                # See if some replay data should be stored
+                if group_id is not None:
+                    if self._group_id is None or self._group_id != d["meta"]["group_id"]:
+                        self._group_id = d["meta"]["group_id"]
+                        self._replaydata = transformed["replay"]
+            else:
+                try:
+                    transformed = A.ReplayCompose.replay(self._replaydata, **transform_kwargs)
+                except Exception as e:
+                    logging.warning(f"Replay failed for {d['meta']} with {e}")
+                    transformed = self.transform(**transform_kwargs)
+        else:
+            transformed = self.transform(**transform_kwargs)
 
         transformed_case = _atransform_into_case(transformed)
         d.update(transformed_case)
@@ -358,8 +458,8 @@ class Alb:
 
 
 class AlbWithBoxes(Alb):
-    def __init__(self, transforms: TransformsSeqType) -> None:
-        super().__init__(transforms, support_boxes=True)
+    def __init__(self, transforms: TransformsSeqType, **kwargs) -> None:
+        super().__init__(transforms, support_boxes=True, **kwargs)
 
 
 class UnifySizes:
@@ -367,44 +467,49 @@ class UnifySizes:
     Can be used before a collate_fn in dataloaders to make sure that all images have the same size.
 
     The size will be divisable by divisable_by to accomodate network constraints.
-
-    The dynamic batch size can be tuned by the max_pixels_in_batch parameter.
-    For example, if you think that you can fit a batch size of 96 224x224 images into your GPU memory,
-    you can set max_pixels_in_batch to 96*224*224.
-
-    THIS WILL CHANGE THE ORDER INSIDE THE BATCH if not `enforce_order`!
     """
 
     def __init__(
         self,
         divisable_by=32,
-        max_pixels_in_batch=None,
         max_edge_len=None,
         support_boxes=False,
-        enforce_order=False,
     ) -> None:
         self.divisable_by = divisable_by
-        self.max_pixels_in_batch, self.max_edge_len = max_pixels_in_batch, max_edge_len
+        self.max_edge_len = max_edge_len
         self.support_boxes = support_boxes
-        self.enforce_order = enforce_order
+        if max_edge_len is not None:
+            assert (
+                max_edge_len % divisable_by == 0
+            ), f"max_edge_len {max_edge_len} should be divisable by {divisable_by}"
 
     @staticmethod
-    def resize_case(d: Dict[str, Any], new_width: int, new_height: int, support_boxes: bool = False) -> Dict[str, Any]:
+    def add_size_to_meta(d: Dict[str, Any]) -> Dict[str, Any]:
         if "meta" not in d:
             d["meta"] = {}
 
-        # assert "original_image_size" not in d["meta"], "original_image_size already exists in meta"
-        if "original_image_size" not in d["meta"]:
+        if "original_image_size" not in d["meta"]:  # Store the size before the first resize
             # If the image instance is already in a format suitable for Albumentations, the channel dim is first
             d["meta"]["original_image_size"] = d["image"].shape[1:]
-        d["meta"]["image_size_before_resize_case"] = d["image"].shape[1:]
+        d["meta"]["image_size_before_resize_case"] = d["image"].shape[1:]  # Store the most recent image size
 
-        return Alb(transforms=[A.Resize(new_height, new_width)], support_boxes=support_boxes)(d)
+        return d
 
     @staticmethod
-    def get_divisable_dims(img: torch.Tensor, divisable_by: int) -> Tuple[int, int]:
+    def resize_case(d: Dict[str, Any], resizer) -> Dict[str, Any]:
+        d = UnifySizes.add_size_to_meta(d)
+
+        return resizer(d)
+
+    @staticmethod
+    def get_divisable_dims(img: torch.Tensor, divisable_by: int, max_edge: int | None) -> Tuple[int, int]:
         height = img.shape[1]
         width = img.shape[2]
+
+        if max_edge is not None and max(height, width) > max_edge:
+            scale = max_edge / max(height, width)
+            height = int(height * scale)
+            width = int(width * scale)
 
         width_divisable = make_divisable_by(width, by=divisable_by)
         height_divisable = make_divisable_by(height, by=divisable_by)
@@ -412,56 +517,11 @@ class UnifySizes:
         return height_divisable, width_divisable
 
     def __call__(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        # Pick one random element from batch
+        # Pick one random element from batch to determine the size to which all images will be resized.
         sizegiver = random.choice(batch)
-
-        # If the max edge length is not none, first resize the sizegiver keeping its aspect ratio
-        if self.max_edge_len is not None:
-            if sizegiver["image"].shape[1] > self.max_edge_len or sizegiver["image"].shape[2] > self.max_edge_len:
-                # Resizing only needs to happen if the image is larger than the max_edge_len
-                sizegiver = Alb(
-                    transforms=[A.LongestMaxSize(max_size=self.max_edge_len, always_apply=True)],
-                    support_boxes=self.support_boxes,
-                )(sizegiver)
-
-        height_divisable, width_divisable = self.get_divisable_dims(sizegiver["image"], self.divisable_by)
-
-        # The batch size might need to be adapted if the image size is changed
-        if self.max_pixels_in_batch is not None:
-            new_batch_size = self.max_pixels_in_batch // (width_divisable * height_divisable)
-            if new_batch_size < len(batch):
-                logging.warning(f"UnifySizes had to reduce batch size from {len(batch)} to {new_batch_size}!")
-        else:
-            new_batch_size = len(batch)
-
-        # Resize all images in the batch to the same size
-        filtered_batch = (
-            [
-                self.resize_case(
-                    sizegiver,
-                    width_divisable,
-                    height_divisable,
-                    support_boxes=self.support_boxes,
-                )
-            ]
-            if not self.enforce_order
-            else []
+        height_divisable, width_divisable = self.get_divisable_dims(
+            sizegiver["image"], self.divisable_by, self.max_edge_len
         )
-        for d in batch:
-            # sizegiver is already in the batch
-            if (d is sizegiver) and (not self.enforce_order):
-                continue
-
-            if len(filtered_batch) < new_batch_size:
-                filtered_batch.append(
-                    self.resize_case(
-                        d,
-                        width_divisable,
-                        height_divisable,
-                        support_boxes=self.support_boxes,
-                    )
-                )
-            else:
-                break
-
-        return filtered_batch
+        resizer = Alb(transforms=[A.Resize(height_divisable, width_divisable)], support_boxes=self.support_boxes)
+        # Resize all images in the batch to the same size
+        return [self.resize_case(d, resizer) for d in batch]

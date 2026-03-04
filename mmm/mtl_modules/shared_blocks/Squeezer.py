@@ -1,12 +1,12 @@
-from typing import Mapping, Tuple, Annotated, Union
-from pydantic import Field
+from typing import Annotated, Any, Mapping, Tuple, Union
 
 import torch
 import torch.nn as nn
+from pydantic import Field
 
-from mmm.mtl_modules.shared_blocks.SharedBlock import ModelInput, SharedBlock
+from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.neural.activations import ActivationFn, ActivationFunctionConfig
-from mmm.neural.pooling import AttentionPoolingConfig, GlobalPoolingConfig, GlobalPooling
+from mmm.neural.pooling import AttentionPoolingConfig, GlobalPooling, GlobalPoolingConfig
 
 PoolingConfigs = Union[AttentionPoolingConfig, GlobalPoolingConfig]
 
@@ -19,7 +19,7 @@ class Squeezer(SharedBlock):
     class Config(SharedBlock.Config):
         module_name: str = "squeezer"
         out_channels: int = Field(
-            -1,
+            default=-1,
             description="""Number of output channels, -1 for number of input channels.
             In that case, no convolution is applied.
             """,
@@ -61,9 +61,10 @@ class Squeezer(SharedBlock):
 
     def forward(self, feature_pyramid: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         # The order is inspired by torchvision.ops.misc.ConvNormActivation
-        pooled = self.activation(self.norm(self.conv(self.pool(feature_pyramid[-1]))))
+        # pooled = self.activation(self.norm(self.conv(self.pool(feature_pyramid[-1]))))
 
         lowest_lvl = self.activation(self.norm(self.conv(feature_pyramid[-1])))
+        pooled = self.pool(lowest_lvl)
 
         # experimental
         if self.args.connect_latent_and_feature:
@@ -71,8 +72,8 @@ class Squeezer(SharedBlock):
 
         return lowest_lvl, pooled
 
-    def get_example_input(self) -> ModelInput | Tuple[ModelInput, ...]:
-        return [torch.rand(1, self.enc_out_channels[-1], 7, 7).to(self.torch_device)]
+    def get_example_input(self) -> tuple[Any, ...]:
+        return (torch.rand(1, self.enc_out_channels[-1], 7, 7).to(self.torch_device),)
 
     def get_dynamic_axes(self) -> Mapping[str, Mapping[int, str]]:
         return {"input": {0: "batch_size", 2: "height", 3: "width"}}

@@ -1,31 +1,32 @@
-from pathlib import Path
+import logging
 import os
-from typing import Optional
-from enum import Enum
-import numpy as np
-import imageio
-import wandb
 import re
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
+import imageio
+import numpy as np
+import wandb
 
 try:
-    import plotly.graph_objects as go
     import plotly.express as px
+    import plotly.graph_objects as go
 except ImportError:
     go, px = None, None
+from typing import Callable, Dict, List
+
+import cv2
 import torch
 import torch.nn as nn
 
-from typing import List, Dict, Callable
-
-import cv2
-
 from mmm.DataSplit import DataSplit
-from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
+from mmm.mtl_modules.tasks.MTLTask import MTLTask
 
 
 def remove_wandb_special_chars(s: str) -> str:
-    for special_char in [".", "/"]:
+    for special_char in [".", "/", "|"]:
         s = s.replace(special_char, "")
     return s
 
@@ -453,8 +454,9 @@ def _get_st_plot(api, path, task, metric):
 
 @torch.no_grad()
 def multitask_embedding_table(ts: List[MTLTask], enc: PyramidEncoder, max_batches: int) -> wandb.Table:
-    from mmm.task_sampling import BalancedTaskSampler
     from tqdm.auto import tqdm
+
+    from mmm.task_sampling import BalancedTaskSampler
 
     logtable = wandb.Table(columns=["taskid", "tooltip", "repr", "internal_group"])
 
@@ -480,3 +482,10 @@ def multitask_embedding_table(ts: List[MTLTask], enc: PyramidEncoder, max_batche
             break
 
     return logtable
+
+
+def get_wandb_file_logger() -> logging.Logger:
+    logger_name = wandb.run.name
+    logger = logging.getLogger(logger_name)
+    logger.addHandler(logging.FileHandler(filename=(filepath := Path(wandb.run.dir) / f"{logger_name}.log")))
+    return logger, filepath

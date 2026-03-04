@@ -1,22 +1,87 @@
-from pathlib import Path
-import logging
-from functools import partial
-import os
-import json
 import hashlib
+import json
+import logging
+import os
+from functools import partial
+from pathlib import Path
+from shutil import rmtree
+from typing import List, Literal, Tuple, Type, TypeVar
 
-from typing import List, TypeVar, Type, Dict, Tuple, Literal
 import numpy as np
 import torch
-import torch.nn.functional as nnF
-
-from mmm.BaseModel import BaseModel
-
-from shutil import rmtree
-from pathlib import Path
+from pydantic import ValidationError
 
 from mmm.BaseModel import BaseModel
 from mmm.logging.type_ext import StepMetricDict
+
+
+def extract_ids_from_batch(ids: list[str]) -> torch.Tensor:
+    """
+    Takes a list of ids like ["a", "a", "b"] and return a torch.Tensor([0, 0, 1])
+    """
+    unique_ids = list(dict.fromkeys(ids))  # Preserve order but remove duplicates
+    id_to_index = {id_: i for i, id_ in enumerate(unique_ids)}
+    return torch.tensor([id_to_index[id_] for id_ in ids])
+
+
+def build_batch_of_sequences(x: torch.Tensor, supercase_indices: torch.Tensor):
+    """
+    x is given as a [B, embedding_dims...] tensor.
+    supercase_indices is a [B] tensor and the number of unique values dictate the new batchsize.
+
+    Returns the new batch as [batch_size, sequence_length, embedding_dims...]
+    and a src_key_padding_mask with paddings for all sequences.
+
+    Masked values are set to True.
+    In other words, a mask with only zeroes would only be possible with equally long sequences.
+
+    Example:
+
+    >>> from mmm.utils import build_batch_of_sequences
+    >>> seq1, seq2 = torch.rand(S1:=3, E:=4), torch.rand(S2:=2, E)
+    >>> dense_v = torch.cat([seq1, seq2], dim=0)
+    >>> seq_batch, padding_mask = build_batch_of_sequences(dense_v, supercase_indices=torch.tensor([0, 0, 0, 1, 1]))
+    >>> list(seq_batch.shape), padding_mask.tolist()
+    ([2, 3, 4], [[False, False, False], [False, False, True]])
+    """
+    embedding_dims = x.shape[1:]
+    supercases, supercase_counts = supercase_indices.unique(return_counts=True, sorted=True)
+    # Verify that supercases are sorted AND in the same order that they appear in supercase_indices.unique()
+    # assert torch.all(supercases == torch.arange(len(supercases), device=x.device))
+    # assert torch.all(supercases == supercase_indices.unique(sorted=True))
+    # assert torch.all(supercases == supercase_indices.unique())
+    seq_len, new_batchsize = supercase_counts.max(), len(supercases)
+
+    # For each supercase, create a tensor of the same length as the longest supercase and a mask
+    res = torch.zeros(new_batchsize, seq_len, *embedding_dims, device=x.device)
+    # A one in the mask means that the position is NOT attended to. In other words, all zeros would be unmasked.
+    src_key_padding_mask = torch.ones(new_batchsize, seq_len, dtype=torch.bool, device=x.device)
+    for index_in_new_batch, supercase_id in enumerate(supercases):
+        positions_in_x = torch.where(supercase_indices == supercase_id)[0]
+        reprs_of_supercase = x[positions_in_x]
+        res[index_in_new_batch, : len(reprs_of_supercase)] = reprs_of_supercase
+        # Unmask the positions that are actually used
+        src_key_padding_mask[index_in_new_batch, : len(reprs_of_supercase)] = False
+
+    return res, src_key_padding_mask
+
+
+def build_batch_of_instances(seq_batch: torch.Tensor, supercase_indices):
+    """
+    Build the batch of instances from the sequence batch in exactly the same order as the input x.
+
+    supercase_indices is an unsorted [B] tensor which dictates the order in the output.
+    """
+    supercases, supercase_counts = supercase_indices.unique(return_counts=True, sorted=True)
+
+    # The output Tensor will have the same depth as the sequence tensor
+    out_tensor = torch.zeros(len(supercase_indices), seq_batch.shape[2], device=seq_batch.device)
+
+    for supercase_id, supercase_count in zip(supercases, supercase_counts):
+        # Add the instances of this supercase to the output tensor
+        out_tensor[supercase_indices == supercase_id] = seq_batch[supercase_id, :supercase_count]
+
+    return out_tensor
 
 
 def check_streamlit():
@@ -153,7 +218,7 @@ def disk_cacher(cache_path: Path | Literal["local", "shared"] = "local", disable
             if p.exists() and not disable:
                 try:
                     with open(p, "rb") as f:
-                        return torch.load(f)
+                        return torch.load(f, weights_only=False)
                 except EOFError as e:
                     # This cache seems to be invalid, remove it!
                     logging.warn(f"Removing and recomputing {p} because of exception {e}, {attempt=}")
@@ -197,7 +262,13 @@ def load_config_from_str(basemodel: Type[T], config_str: str, verbose=True) -> T
         # Only import if user wants to know the difference of the config to its default!
         from deepdiff import DeepDiff
 
-        differences = DeepDiff(basemodel().dict(), config.dict())
+        try:
+            default_config = basemodel().model_dump()
+        except ValidationError as e:
+            print(f"Showing differences only possible for configs with default values: {e}")
+            return config
+
+        differences = DeepDiff(default_config, config.model_dump())
         if differences:
             diff_dict = differences.to_dict()
             print(f"Using adapted default config with {list(diff_dict.keys())}! (see logging.debug for details)")
@@ -243,13 +314,10 @@ def flatten_list_of_dicts(step_metrics: List[StepMetricDict]) -> StepMetricDict:
     ... ])
     {'a': array([1, 2, 3, 4]), 'b': array([1, 2])}
     """
-    metric_arrs: Dict[str, List[np.ndarray]] = {}
+    metric_arrs: dict[str, list[np.ndarray]] = {}
     for d in step_metrics:
         for k, v in d.items():
-            if k not in metric_arrs:
-                metric_arrs[k] = []
-
-            metric_arrs[k].append(v)
+            metric_arrs.setdefault(k, []).append(v)
 
     metrics = {k: np.concatenate(arrs) for k, arrs in metric_arrs.items()}
     return metrics
@@ -315,9 +383,10 @@ def create_sample_efficiency_plot_from_wandb(
 
     return: plotly figure object
     """
-    import wandb
     import re
+
     import plotly.graph_objects as go
+    import wandb
 
     api = wandb.Api()
     run = api.run(f"{entity}/{project_name}/{run_id}/")

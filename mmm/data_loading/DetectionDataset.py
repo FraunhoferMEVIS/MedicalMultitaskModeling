@@ -1,11 +1,10 @@
-import logging
+from typing import Any, Callable, Optional, TypeVar
+
 import numpy as np
 import torch
-import cv2
-from typing import List, Optional, Callable, Dict, Any, TypeVar, Tuple
-
-from torch.utils.data import Dataset
 import torchvision.transforms as transforms
+from torch.utils.data import Dataset
+
 from .MTLDataset import MTLDataset, SrcCaseType
 from .SemSegDataset import SemSegDataset
 
@@ -19,7 +18,7 @@ def get_mmdet_annos(gtboxes, gtlabels):
     return [{"bboxes": box, "labels": lbl} for box, lbl in zip(gtboxes, gtlabels)]
 
 
-def get_mmdet_preds(predboxes, predlabels, class_names: List[str]):
+def get_mmdet_preds(predboxes, predlabels, class_names: list[str]):
     det_results = []
     for image_pred_boxes, image_pred_labels in zip(predboxes, predlabels):
         # A list of predictions for each class
@@ -31,7 +30,7 @@ def get_mmdet_preds(predboxes, predlabels, class_names: List[str]):
     return det_results
 
 
-def eval_map_batch(predboxes, predlabels, gtboxes, gtlabels, class_names: List[str]):
+def eval_map_batch(predboxes, predlabels, gtboxes, gtlabels, class_names: list[str]):
     preds = get_mmdet_preds(predboxes, predlabels, class_names)
     annos = get_mmdet_annos(gtboxes, gtlabels)
 
@@ -61,7 +60,7 @@ class DetectionDataset(MTLDataset):
         By default, collate_fn overwriters work with a list of cases.
         """
         # No inputs are stacked, detection tasks want lists!
-        batch_type = TypeVar("batch_type", bound=List[Dict[str, Any]])
+        batch_type = TypeVar("batch_type", bound=list[dict[str, Any]])
 
         def f(x: batch_type) -> batch_type:
             return x
@@ -69,10 +68,10 @@ class DetectionDataset(MTLDataset):
         return f
 
     @staticmethod
-    def from_semseg(ds: SemSegDataset, for_class_indices: Tuple[int, ...]):
+    def from_semseg(ds: SemSegDataset, for_class_indices: tuple[int, ...]):
         """Computes connected components in the mask and each connected component will get a box"""
 
-        def convert_semseg_to_detection_case(semseg_case: Dict[str, Any]) -> Dict[str, Any]:
+        def convert_semseg_to_detection_case(semseg_case: dict[str, Any]) -> dict[str, Any]:
             assert "image" in semseg_case and "label" in semseg_case
 
             boxes = []
@@ -102,30 +101,35 @@ class DetectionDataset(MTLDataset):
     def __init__(
         self,
         src_ds: Dataset[SrcCaseType],
-        src_transform: Optional[Callable[[SrcCaseType], Dict[str, Any]]] = None,
-        class_names: Optional[List[str]] = None,
+        src_transform: Optional[Callable[[SrcCaseType], dict[str, Any]]] = None,
+        class_names: Optional[list[str]] = None,
         collate_fn: Optional[Callable] = None,
         *args,
         **kwargs,
     ) -> None:
         assert class_names is not None, "Detection datasets without class names are deprecated"
-        self.vis_classes: List[str] = class_names
+        self.vis_classes: list[str] = class_names
         if collate_fn is not None:
             collate_fn = transforms.Compose([collate_fn, self.batch_collater()])
         else:
             collate_fn = self.batch_collater()
         super().__init__(
             src_ds,
-            ["image", "boxes", "labels"],
-            ["original_size", "meta"],
             src_transform,
             collate_fn=collate_fn,
             *args,
             **kwargs,
         )
 
-    def verify_case_by_index(self, index: int) -> Dict[str, Any]:
-        case = super().verify_case_by_index(index)
+    @staticmethod
+    def get_mandatory_keys() -> list[str]:
+        return super(DetectionDataset, DetectionDataset).get_mandatory_keys() + ["image", "boxes", "labels"]
+
+    @staticmethod
+    def get_optional_keys() -> list[str]:
+        return super(DetectionDataset, DetectionDataset).get_optional_keys() + ["original_size"]
+
+    def verify_case(self, case):
         self.assert_image_data_assumptions(case["image"])
         assert (
             case["boxes"].shape[0] == case["labels"].shape[0]
@@ -158,9 +162,7 @@ class DetectionDataset(MTLDataset):
                 for label in case["labels"]:
                     assert label >= 0 <= len(self.vis_classes)
 
-        return case
-
-    def set_classes_for_visualization(self, classes: List[str]):
+    def set_classes_for_visualization(self, classes: list[str]):
         self.vis_classes = classes
 
     def get_classes_for_visualization(
@@ -169,8 +171,9 @@ class DetectionDataset(MTLDataset):
         assert self.vis_classes is not None
         return self.vis_classes
 
-    def st_case_viewer(self, case: Dict[str, Any], i: int) -> None:
+    def st_case_viewer(self, case: dict[str, Any], i: int) -> None:
         import streamlit as st
+
         from mmm.logging.st_ext import blend_with_mask
 
         st.title("Untransformed image:")
@@ -185,8 +188,9 @@ class DetectionDataset(MTLDataset):
         )
         st.write(case)
 
-    def _visualize_batch_case(self, batch: List[Dict[str, Any]], i: int) -> None:
+    def _visualize_batch_case(self, batch: list[dict[str, Any]], i: int) -> None:
         import streamlit as st
+
         from mmm.logging.st_ext import blend_with_mask
 
         patch = batch[i]["image"]
@@ -205,5 +209,5 @@ class DetectionDataset(MTLDataset):
         if "meta" in batch[i]:
             st.write(batch[i]["meta"])
 
-    def _compute_batchsize_from_batch(self, batch: List[Dict[str, Any]]) -> int:
+    def _compute_batchsize_from_batch(self, batch: list[dict[str, Any]]) -> int:
         return len(batch)

@@ -1,6 +1,6 @@
 import logging
-from typing import List, Tuple
 from types import SimpleNamespace
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn

@@ -2,19 +2,35 @@
 Wrappers for models imported from torchvision model zoo
 """
 
-from typing import List, Dict, Literal, Tuple
-from pydantic import Field
-
-import torch.nn as nn
+from typing import Dict, List, Literal
 
 import torch
 import torch.nn as nn
 import torchvision.models as torch_models
+from pydantic import Field
 from torchvision.models._utils import IntermediateLayerGetter
-import logging
+from torchvision.models.convnext import CNBlockConfig, ConvNeXt
+
+from mmm.torch_ext import infer_stride_channels_from_features
 
 from ..TorchModule import TorchModule
-from mmm.torch_ext import infer_stride_channels_from_features
+
+
+def build_convnext_xlarge(weights, stochastic_depth_prob=0.5):
+    """
+    Torchvision provides configurations for ConvNeXt-Large, but not for X-Large.
+    See section 3 in https://arxiv.org/pdf/2201.03545 for the settings in this function.
+    """
+    # For ConvNeXt-L would be: C = (192, 384, 768, 1536), B = (3, 3, 27, 3)
+    # ConvNeXt-XL: C = (256, 512, 1024, 2048), B = (3, 3, 27, 3)
+    block_setting = [
+        CNBlockConfig(256, 512, 3),
+        CNBlockConfig(512, 1024, 3),
+        CNBlockConfig(1024, 2048, 27),
+        CNBlockConfig(2048, None, 3),
+    ]
+    # Use only one class because the resulting layer is not used
+    return ConvNeXt(block_setting, stochastic_depth_prob=stochastic_depth_prob, num_classes=1).features
 
 
 class FeatureBackbone(nn.Module):
@@ -49,6 +65,18 @@ layername_KB = {
         "constr": lambda w: torch_models.efficientnet_v2_s(weights=w).features,
         "layernames": ["2", "3", "5", "7"],  # hand picked for strides 4, 8, 16, 32
         "weights": torch_models.EfficientNet_V2_S_Weights.DEFAULT,
+    },
+    "convnext_large": {
+        "constr": lambda w: torch_models.convnext_large(weights=w).features,
+        # Determined by looking at all shapes and picking the latest layers with strides 4, 8, 16, 32
+        "layernames": ["1", "3", "5", "7"],
+        "weights": torch_models.ConvNeXt_Large_Weights.DEFAULT,
+    },
+    "convnext_xlarge": {
+        "constr": build_convnext_xlarge,
+        # Determined by looking at all shapes and picking the latest layers with strides 4, 8, 16, 32
+        "layernames": ["1", "3", "5", "7"],
+        "weights": None,  # Torchvision does not provide pretrained weights for ConvNeXt X-Large
     },
 }
 

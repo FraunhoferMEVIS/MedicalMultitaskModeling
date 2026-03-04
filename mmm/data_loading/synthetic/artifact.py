@@ -1,7 +1,8 @@
-from typing import Dict, Any
+from typing import Any, Dict
+
+import cv2 as cv
 import torch
 import torchvision
-import cv2 as cv
 from monai.transforms import Transform
 
 

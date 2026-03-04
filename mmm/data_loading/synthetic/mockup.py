@@ -4,7 +4,8 @@ Convenience utilities for testing without plausible training.
 For a multi-task simulation dataset which can be trained on, take a look at the shape datasets.
 """
 
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
+
 import torch
 from torch.utils.data import Dataset
 

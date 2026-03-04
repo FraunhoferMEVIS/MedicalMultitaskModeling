@@ -1,0 +1,46 @@
+<div class="gallery-controls">
+    <label for="gallery-image-size-slider">Image Size:</label>
+    <input type="range" min="28" max="1024" value="256" class="gallery-image-size-slider"
+        id="gallery-image-size-slider">
+</div>
+<details class="overlay-group-details" open>
+    <summary>
+        Label Controls
+        <input type="submit" value="Hide all groups" id="hide-all-groups-btn" />
+        <label for="toggle-captions-checkbox">Show Captions</label>
+        <input type="checkbox" id="toggle-captions-checkbox" checked />
+    </summary>
+    
+    <div class="overlay-controls"></div>
+</details>
+<div class="image-gallery"></div>
+<!-- Image templates -->
+<template id="image2d-template">
+    <figure class="main-figure">
+        <!-- Here, image will be appended -->
+        <!-- Here, overlays will be appended -->
+        <figcaption class="main-figure-caption">set caption!</figcaption>
+    </figure>
+</template>
+<template id="base-image-template">
+    <img class="main-image full-size-image">
+</template>
+<template id="overlay-template">
+    <img class="overlay full-size-image">
+</template>
+<!-- Overlay control templates -->
+<template id="overlay-control-group-template">
+    <div class="overlay-control-group">
+        <span class="overlay-control-group-name"></span>
+        <button class="overlay-control-hide-all-button">
+            Hide All
+        </button>
+    </div>
+</template>
+<template id="overlay-control-template">
+    <div class="overlay-control">
+        <span class="overlay-control-name"></span>
+        <input type="range" min="0.0" max="1.0" step="0.01" value="0.5" class="opacity-slider">
+        <input type="range" min="0" max="360" step="1" class="color-slider">
+    </div>
+</template>

@@ -1,54 +1,130 @@
 import itertools
-import json
 import logging
-import os
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Tuple
+from typing import Any, Dict, Generator, List, Literal, Tuple
 
 import numpy as np
 import tiffslide as ts
 import torch
 import torchvision.transforms.functional as tvF
+import torchvision.transforms.functional as F
 import wandb
+from m3_sdk.DistributedPath import DistributedPath
+from m3_sdk.geojson import GeoAnno
+from sklearn.metrics import accuracy_score, f1_score
+from torch.utils.data import DataLoader, Dataset, IterableDataset, get_worker_info
+from tqdm.notebook import tqdm
+
+from mmm.data_loading.geojson.NoUsefulWindowException import NoUsefulWindowException
 from mmm.interactive import blocks
 from mmm.interactive import configs as cfs
-from mmm.interactive import data, pipes, tasks, training
 from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 from mmm.mtl_modules.tasks.ClassificationTask import ClassificationTask
 from mmm.utils import convert_tile_into_patchbatch, flatten_list_of_dicts
-from sklearn.metrics import accuracy_score, f1_score
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
-from tqdm.notebook import tqdm
 
 
-class SemiColConfig(cfs.BaseModel):
-    write: bool = False
-    alternative_path: str = "/output/tissueconcepts/nics/only-nics"
-    level: int = 0
-    patch_size: int = 224
+class WSIWindows(Dataset):
+    @staticmethod
+    def build_window_gen(for_slide, extraction, levels, sample_geojson, max_instances):
+        valid_levels_in_this_slide = [l for l in levels if l < for_slide.level_count]
+        window_generators = [
+            extraction.iter_valid_windows(
+                anno=GeoAnno(json_dict=anno, origin_id=i),
+                level_downsamples={l: for_slide.level_downsamples[l] for l in valid_levels_in_this_slide},
+            )
+            for i, anno in enumerate(sample_geojson["features"])
+        ]
+        random.shuffle(window_generators)
 
+        def cycle(generators):
+            """Takes an iterable of generator objects and yields values from each generator
+            in a round-robin fashion. If a generator is exhausted (raises StopIteration), it is removed
+            from the list of generators."""
+            generators_left = list(generators)
+            while generators_left:
+                for generator in generators_left:
+                    try:
+                        yield next(generator)
+                    except StopIteration:
+                        generators_left.remove(generator)
+                    except NoUsefulWindowException:
+                        logging.debug(f"No useful window found in {generator}")
+                        generators_left.remove(generator)
 
-class TupacConfig(cfs.BaseModel):
-    write: bool = False
-    alternative_path: str = "/output/tissueconcepts/nics/only-nics"
-    level: int = 1
-    patch_size: int = 224
+        circling_generator = cycle(window_generators)
 
+        window_generator = (
+            (level, (y, x), patchsize_tuple)
+            for level, (x, y), patchsize_tuple in itertools.islice(
+                circling_generator,
+                max_instances,
+            )
+        )
+        return window_generator
 
-class NICConfig(cfs.BaseModel):
-    semicol_config: SemiColConfig = SemiColConfig()
-    tupac_config: TupacConfig = TupacConfig()
-    head_config: blocks.PyramidEncoder.Config = blocks.PyramidEncoder.Config(
-        model=cfs.MiniConvNetConfig(num_channels=768),
-        # Because of varying input sizes the batchsize is 1 and the accumulation is large.
-        # High gradient accumulation means batchnorm is a bad choice
-        norm_layer="affinelayernorm",
-        # activation_fn=cfs.ActivationFunctionConfig(fn_type=cfs.ActivationFn.ReLU),
-        # hidden_dim=64,
-        module_name="encoder",
-    )
+    def __init__(
+        self,
+        levels_hw_sizes: list[tuple[int, tuple[int, int], tuple[int, int]]] | Generator,
+        slide_path: DistributedPath,
+    ) -> None:
+        self.levels_hw_sizes, self.slide_path = levels_hw_sizes, slide_path
+        self.slide_instance: ts.TiffSlide | None = None
+
+    @staticmethod
+    def open_slide(p: DistributedPath | Path | str, force_openslide: bool = False):
+        if not isinstance(p, DistributedPath):
+            dist_path = (
+                DistributedPath.from_string(p) if isinstance(p, str) else DistributedPath.from_string(str(p.absolute()))
+            )
+        else:
+            dist_path = p
+        slide_needs_openslide = force_openslide or dist_path.upath().suffix in [".mrxs", ".dcm"]
+        if slide_needs_openslide:
+            try:
+                from openslide import OpenSlide
+            except ImportError:
+                raise Exception(f"Openslide is not installed, but required for {dist_path.uri}")
+
+            assert not dist_path.options, f"Openslide does only support local files, not {dist_path}"
+
+            return OpenSlide(dist_path.to_local_path())
+        else:
+            return ts.TiffSlide(dist_path.file().open())
+
+    def __len__(self):
+        return len(self.levels_hw_sizes)
+
+    def read_instance(self, level, row, col, edge1, edge2):
+        self.slide_instance = self.open_slide(self.slide_path) if self.slide_instance is None else self.slide_instance
+
+        # downsample_fac = self.slide_instance.level_downsamples[level]
+        # row_l0, col_l0 = row * downsample_fac, col * downsample_fac
+        row_l0, col_l0 = row, col
+        try:
+            is_openslide_slide = not isinstance(self.slide_instance, ts.TiffSlide)
+            read_settings = {} if is_openslide_slide else dict(as_array=True)
+            img = self.slide_instance.read_region(
+                (col_l0, row_l0),  # the dataset is in (y, x) format, but tiffslide is in (x, y) format
+                level,
+                (edge1, edge2),
+                **read_settings,
+            )
+            if is_openslide_slide:
+                img = np.array(img)[..., :3]  # openslide returns RGBA, we only want RGB
+        except Exception as e:
+            img = np.zeros((edge1, edge2, 3), dtype=np.uint8)
+            logging.error(f"Error while reading region {(row, col)}: {e}")
+        return {"image": F.to_tensor(img), "row_col": (row, col), "level": level}
+
+    def __getitem__(self, index) -> torch.Tensor:
+        level, (row, col), (edge1, edge2) = self.levels_hw_sizes[index]
+        return self.read_instance(level, row, col, edge1, edge2), (level, (row, col), (edge1, edge2))
+
+    def __iter__(self):
+        for level, (row, col), (edge1, edge2) in self.levels_hw_sizes:
+            yield self.read_instance(level, row, col, edge1, edge2), (level, (row, col), (edge1, edge2))
 
 
 class NICTask(ClassificationTask):
@@ -60,7 +136,7 @@ class NICTask(ClassificationTask):
         pass
 
     def _visualize_preds(self, training_ims, step_metrics: Dict, metas: List[Dict]) -> Dict[str, Any]:
-        vis_n = min(self._takeout_vis_budget(), training_ims.size(0))
+        vis_n = min(self.ask_for_visualization(), training_ims.size(0))
 
         if vis_n <= 0:
             return {}

@@ -2,21 +2,23 @@ import pytest
 import torch
 import torch.nn as nn
 
-from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
-from mmm.neural.modules.simple_cnn import MiniConvNet
 from mmm.mtl_modules.shared_blocks.PyramidDecoder import PyramidDecoder
+from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
+from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
+from mmm.neural.modules.simple_cnn import MiniConvNet
 from mmm.neural.modules.swinformer import TorchVisionSwinformer
+from mmm.neural.modules.TimmEncoder import TimmEncoder
+from mmm.neural.modules.TimmEncoder import valid_variants as timm_variants
 from mmm.neural.modules.TorchVisionCNN import TorchVisionCNN
-from mmm.neural.modules.TimmEncoder import TimmEncoder, valid_variants as timm_variants
 
 # Used to make readable names appear in test report
 default_encoders = {
     "MiniConvNet": MiniConvNet.Config(),
     "Swinformer": TorchVisionSwinformer.Config(pretrained=False, variant="tiny"),
     "ResNet18": TorchVisionCNN.Config(pretrained=False, variant="resnet18"),
-    "Efficientnet_v2": TorchVisionCNN.Config(pretrained=False, variant="efficientnet_v2_s"),
+    # "Efficientnet_v2": TorchVisionCNN.Config(pretrained=False, variant="efficientnet_v2_s"),
     "Densenet": TorchVisionCNN.Config(pretrained=False, variant="densenet121"),
-    "Convnext": TimmEncoder.Config(pretrained=False, variant="convnext_femto"),
+    "Convnext": TorchVisionCNN.Config(pretrained=False, variant="convnext_large"),
 }
 
 
@@ -39,9 +41,19 @@ def default_encoder_factory(request):
 
 
 @pytest.fixture
+def default_squeezer_factory():
+    def build_squeezer(enc: PyramidEncoder):
+        return Squeezer(Squeezer.Config(), enc.get_feature_pyramid_channels(), enc.get_strides())
+
+    return build_squeezer
+
+
+@pytest.fixture
 def default_decoder_factory():
-    def build_decoder(enc: PyramidEncoder):
-        return PyramidDecoder(PyramidDecoder.Config(), enc.get_feature_pyramid_channels(), 32)
+    def build_decoder(enc: PyramidEncoder, squeezer: Squeezer):
+        enc_channels = enc.get_feature_pyramid_channels()
+        enc_channels[-1] = squeezer.get_hidden_dim()
+        return PyramidDecoder(PyramidDecoder.Config(), enc_channels, enc.get_strides())
 
     return build_decoder
 

@@ -1,13 +1,15 @@
 from typing import List, Literal
-from pydantic import Field
-import torch
+
 import timm
-from timm.layers.norm import LayerNorm2d
+import torch
 import torch.nn as nn
+from pydantic import Field
+from timm.layers.norm import LayerNorm2d
 
 from mmm.torch_ext import replace_childen_recursive
-from ..TorchModule import TorchModule
+
 from ..model_protocols import EncoderModel
+from ..TorchModule import TorchModule
 
 
 def replace_timmlayernorm2d_with_defaultcnnnorm(old_norm: LayerNorm2d):
@@ -21,7 +23,8 @@ valid_variants = [
     "convnext_tiny",
     "convnext_small",
     "convnext_large",
-    "convnext_xlarge_384_in22ft1k",
+    "convnextv2_large.fcmae_ft_in22k_in1k_384",
+    "convnextv2_huge.fcmae_ft_in22k_in1k_512",
 ]
 
 

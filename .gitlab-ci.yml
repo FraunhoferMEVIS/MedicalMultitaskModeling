@@ -6,35 +6,56 @@ stages:
 
 default:
   tags:
-    - b0
+    - gigi  # only use "gigi-gpu" when absolutely needed, 10 gigi and 6 gigi-gpu jobs can run in parallel
 
 variables:
-  # To ensure that external users can use MMM, we test the install with another public image
+  # Here, pipx and python should be pre-installed
   PYTHON_IMAGE: mcr.microsoft.com/vscode/devcontainers/python:3.10
+  # Here, uv should be pre-installed
+  DEBIAN_IMAGE: ghcr.io/astral-sh/uv:debian
 
-cache:
-  key:
-    files:
-      - poetry.lock
-      - .gitlab-ci.yml
-    prefix: ${CI_JOB_NAME}
-  paths:
-    - .venv
-    - .cache/pip
-    - local_testing_cache/
+# Anchor for internal certificate installation (reusable in before_script blocks)
+.install_internal_certs: &install_internal_certs
+  - |
+    curl --silent "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installer" | bash \
+    && mkdir -p /usr/local/share/ca-certificates/fme \
+    && cat ./internal_certificates/fme-ca-2025.crt >> /usr/local/share/ca-certificates/fme/fme-ca-2025.crt \
+    && cat ./internal_certificates/fhg_mevis.crt >> /usr/local/share/ca-certificates/fme/fhg_mevis.crt \
+    && update-ca-certificates --verbose
+
+.internal_certs_template:
+  variables:
+    SECURE_FILES_DOWNLOAD_PATH: "./internal_certificates"
+    REQUESTS_CA_BUNDLE: "/etc/ssl/certs/ca-certificates.crt"
+  before_script:
+    - *install_internal_certs
+
+.pytest_template:
+  image: $PYTHON_IMAGE
+  tags:
+    - gigi-gpu
+  variables:
+    SECURE_FILES_DOWNLOAD_PATH: "./internal_certificates"
+    REQUESTS_CA_BUNDLE: "/etc/ssl/certs/ca-certificates.crt"
+    NVIDIA_VISIBLE_DEVICES: "all"
+    NVIDIA_DRIVER_CAPABILITIES: "all"
+  needs: [get-version]
+  stage: test
+  before_script:
+    - *install_internal_certs
+    - pipx install uv
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
 
 # Most jobs that need the version should depend on this job: e.g. by using `needs: [get-version]`
-# Here, we use the 1.0.0 version because it has poetry installed
 get-version:
-  image: $PYTHON_IMAGE
+  image: $DEBIAN_IMAGE
   stage: prepare
-  tags:
-    - docker
-  before_script:
-    - pipx install poetry
   script:
-    # Starting from Gitlab 13.9, this enables other jobs to access the variable
-    - echo "PKGVERSION=$(poetry version -s)" >> deploy.env
+    - echo "PKGVERSION=$(uv version --short)" >> deploy.env  # deploy.env enables other jobs to access the variable
+    - echo "PKGMajorMinorVersion=$(version=$(uv version --short); echo ${version%.*})" >> deploy.env
   artifacts:
     reports:
       dotenv: deploy.env
@@ -43,100 +64,122 @@ ensure-changelog-updated:
   image: $PYTHON_IMAGE
   stage: prepare
   needs: [get-version]
-  tags:
-    - docker
   script:
     # Assert that the string "## $PKGVERSION" is present in the CHANGELOG.md file
     - grep -q "## $PKGVERSION" CHANGELOG.md
 
-# Run static analysis: black
 black:
-  tags:
-    - docker
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  extends: .internal_certs_template
+  image: $DEBIAN_IMAGE
   stage: test
-  needs: [get-version, build-and-publish-stack-image]
+  needs: [get-version]
   script:
-    - black --check --line-length 120 --diff mmm tests
+    - uvx --isolated --with black==23.12.1 black --line-length 120 mmm tests --check --diff
+
+isort:
+  extends: .internal_certs_template
+  image: $DEBIAN_IMAGE
+  stage: test
+  needs: [get-version]
+  script:
+    - uvx --isolated --with isort==5.13.2 isort --profile black --line-length 120 mmm --check --diff
 
 test-no-extras:
-  # The default user in the image matters when discovering tools such as pytest
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  extends: .pytest_template
   variables:
-    ML_DATA_CACHE: ./local_testing_cache/
     MMM_TEST_JOB: "no-extras"
-  needs: [get-version, build-and-publish-stack-image]
-  stage: test
-  before_script:
-    - poetry config virtualenvs.in-project true
-    - poetry install -E testing
   script:
-    - poetry run pytest --doctest-modules --cov=mmm tests mmm -k "not test_convergence and not test_api and not test_export" --junitxml=report.xml
-  artifacts:
-    when: always
-    reports:
-      junit: report.xml
+    - uv run --extra testing --with git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git pytest --doctest-modules --cov=mmm tests mmm --ignore=tests/api --ignore=tests/export -k "not test_convergence" --junitxml=report.xml
 
 test-extra-export:
-  tags:
-    - docker
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  extends: .pytest_template
   variables:
-    ML_DATA_CACHE: ./local_testing_cache/
     MMM_TEST_JOB: "extra-export"
-  needs: [get-version, build-and-publish-stack-image]
-  stage: test
-  before_script:
-    - poetry config virtualenvs.in-project true
-    - poetry install -E testing -E export
   script:
-    - poetry run pytest tests/test_export.py --junitxml=report.xml
-  artifacts:
-    when: always
-    reports:
-      junit: report.xml
+    - uv run --extra testing --extra export --with git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git pytest tests/export --junitxml=report.xml
+
+test-extra-api:
+  extends: .pytest_template
+  services:
+    - redis:latest
+  variables:
+    MMM_REDIS_URL: "redis://redis:6379"
+    MMM_TEST_JOB: "extra-api"
+  script:
+    - uv run --extra testing --extra api --with git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git pytest tests/api --junitxml=report.xml
+
+test-mtl-convergence:
+  extends: .pytest_template
+  variables:
+    MMM_TEST_JOB: "mtl-convergence"
+  script:
+    - uv run --extra testing --with git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git pytest --doctest-modules --cov=mmm tests mmm -k "test_convergence" --junitxml=report_convergence.xml
+
+test-inference-notebook:
+  extends: .pytest_template
+  variables:
+    MMM_TEST_JOB: "inference-notebook"
+  script:
+    - uv run --extra interactive --extra testing --with git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git ipython -c "%run ./examples/inference.ipynb"
 
 test-build-package:
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  extends: .internal_certs_template
+  image: $DEBIAN_IMAGE
   stage: test
-  needs: [get-version, build-and-publish-stack-image]
-  tags:
-    - docker
+  needs: [get-version]
   script:
-    - poetry build -f wheel
+    - uv build --wheel
   artifacts:
     paths:
       - dist/*.whl
 
+publish-branch-package:
+  extends: .internal_certs_template
+  image: $DEBIAN_IMAGE
+  when: manual
+  stage: test
+  needs: [get-version]
+  variables:
+    BRANCH_SUFFIX: "${CI_COMMIT_REF_SLUG}"
+    UV_PUBLISH_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
+    UV_PUBLISH_USERNAME: "gitlab-ci-token"
+    UV_PUBLISH_PASSWORD: "${CI_JOB_TOKEN}"
+  script:
+    - export VERSION="${PKGVERSION}+git.${BRANCH_SUFFIX}.${CI_COMMIT_SHORT_SHA}"
+    - echo "Publishing branch build as ${VERSION}"
+    - uv version "${VERSION}"
+    - uv build --wheel
+    - uv publish
+
 test-licenses:
-  tags:
-    - docker
   image: $PYTHON_IMAGE
   needs: [get-version, test-build-package]
   stage: test
   script:
     - pip3 install "dist/medicalmultitaskmodeling-${PKGVERSION}-py3-none-any.whl[all]" --extra-index-url https://gitlab.com/api/v4/groups/11254156/-/packages/pypi/simple
-    - pip3 install pip-licenses
+    - pip3 install pip-licenses-cli
     # ignore false positives
+    # label-studio-sdk - Apache 2.0 https://github.com/HumanSignal/label-studio-sdk/blob/master/LICENSE
     # medicalmultitaskmodeling - self
-    # aiohappyeyeballs - PSF-2.0
-    # attrs - MIT
-    # referencing - MIT
     # ignore cuda runtime libraries
-    - pip-licenses --output-file=licenses.txt --ignore-packages medicalmultitaskmodeling aiohappyeyeballs attrs referencing nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12
+    - pip-licenses --output-file=licenses.txt --ignore-packages label-studio-sdk medicalmultitaskmodeling cuda-bindings nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12 nvidia-cusparselt-cu12 nvidia-nvshmem-cu12 nvidia-cufile-cu12
     - cat licenses.txt
     - cp licenses.txt licenses-$PKGVERSION.txt
     - >
       pip-licenses
-      --ignore-packages medicalmultitaskmodeling medicalmultitaskmodeling aiohappyeyeballs attrs referencing nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12
+      --ignore-packages label-studio-sdk medicalmultitaskmodeling cuda-bindings nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12 nvidia-cusparselt-cu12 nvidia-nvshmem-cu12 nvidia-cufile-cu12
       --allow-only="
       3-Clause BSD License;
       Apache 2.0;
+      Apache-2.0;
+      Apache-2.0 OR BSD-2-Clause;
       Apache License 2.0;
       Apache License v2.0;
       Apache Software License;
       BSD;
+      BSD-2-Clause;
       BSD 3-Clause;
+      BSD-3-Clause;
       BSD License;
       CMU License (MIT-CMU);
       FreeBSD;
@@ -146,80 +189,17 @@ test-licenses:
       ISC License (ISCL);
       MIT;
       MIT License;
+      MIT-CMU;
       Mozilla Public License 2.0 (MPL 2.0);
+      MPL-2.0 AND MIT;
       Python Software Foundation License;
+      PSF-2.0;
       Public Domain;
       The Unlicense (Unlicense);
       "
   artifacts:
     paths:
       - licenses-$PKGVERSION.txt
-
-test-building-docs:
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
-  stage: test
-  variables:
-    MMM_TEST_JOB: "building-docs"
-  tags:
-    - docker
-  needs: [get-version, build-and-publish-stack-image]
-  before_script:
-    - poetry config virtualenvs.in-project true
-    - poetry install -E testing -E api -E detection
-  script:
-    - bash ./rebuild-docs.sh
-  artifacts:
-    paths:
-      - docs/build
-
-test-extra-api:
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
-  variables:
-    ML_DATA_CACHE: ./local_testing_cache/
-  needs: [get-version, build-and-publish-stack-image]
-  stage: test
-  before_script:
-    - poetry config virtualenvs.in-project true
-    # Needs detection as well because it serves detection tasks
-    - poetry install -E testing -E api -E detection
-    - juicefs mount redis://10.142.32.21:9508/1 /jfs -d
-  script:
-    - poetry run pytest tests/test_api.py --junitxml=report.xml
-  artifacts:
-    when: always
-    reports:
-      junit: report.xml
-
-test-mtl-convergence:
-  # The default user in the image matters when discovering tools such as pytest
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
-  variables:
-    ML_DATA_CACHE: ./local_testing_cache/
-  needs: [get-version, build-and-publish-stack-image]
-  stage: test
-  before_script:
-    - poetry config virtualenvs.in-project true
-    - poetry install -E testing
-  script:
-    - nvidia-smi
-    - poetry run pytest --doctest-modules --cov=mmm tests mmm -k "test_convergence" --junitxml=report_convergence.xml
-  artifacts:
-    when: always
-    reports:
-      junit: report_convergence.xml
-
-test-inference-notebook:
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
-  stage: test
-  variables:
-    ML_DATA_CACHE: ./local_testing_cache/
-    MMM_TEST_JOB: "inference-notebook"
-  needs: [get-version, build-and-publish-stack-image]
-  before_script:
-    - poetry config virtualenvs.in-project true
-    - poetry install -E testing -E api -E detection -E interactive
-  script:
-    - poetry run ipython -c "%run ./copier_template/{{{{project_name}}}}/inference.ipynb"
 
 # This requires to setup the Harbor integration in Gitlab settings
 build-and-publish-base-image:
@@ -233,7 +213,7 @@ build-and-publish-base-image:
   before_script:
     - docker info
     - >
-      if docker manifest inspect hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGVERSION > /dev/null; then
+      if docker manifest inspect hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGMajorMinorVersion > /dev/null; then
         echo "Image for version $PKGVERSION exists. Skipping job."
         exit 0
       else
@@ -244,8 +224,8 @@ build-and-publish-base-image:
     - docker build -t baseimage $CI_PROJECT_DIR/docker/mmm-base
 
     # Tag with pkgversion
-    - docker tag baseimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGVERSION
-    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGVERSION
+    - docker tag baseimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGMajorMinorVersion
+    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$PKGMajorMinorVersion
     # Tag with short commit hash as well
     - docker tag baseimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$CI_COMMIT_SHORT_SHA
     - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:$CI_COMMIT_SHORT_SHA
@@ -253,116 +233,69 @@ build-and-publish-base-image:
     - docker tag baseimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:${CI_COMMIT_REF_NAME//\//-}
     - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-base:${CI_COMMIT_REF_NAME//\//-}
 
-build-and-publish-stack-image:
-  timeout: 3h 30m
-  stage: build
-  tags:
-    - docker-socket
-  needs: [get-version, build-and-publish-base-image]
-  services:
-    - docker:20.10.22-dind
-  image: docker:20.10.22
-  before_script:
-    - >
-      if docker manifest inspect hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$PKGVERSION > /dev/null; then
-        echo "Image for version $PKGVERSION exists. Skipping job."
-        exit 0
-      else
-        echo "Image does not exist. Proceeding with job."
-      fi
-    - echo "$FHGHARBORPASS" | docker login -u $FHGHARBORUSER --password-stdin $FHGHARBORHOST
-  script:
-    # Use the Dockerfile located in $CI_PROJECT_DIR/docker/mmm-stack, build context should still be $CI_PROJECT_DIR
-    - docker build -t stackimage --build-arg PKGVERSION=$PKGVERSION -f $CI_PROJECT_DIR/docker/mmm-stack/Dockerfile $CI_PROJECT_DIR/
-
-    # Tag with pkgversion
-    - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$PKGVERSION
-    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$PKGVERSION
-    # Tag with short commit hash as well
-    - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$CI_COMMIT_SHORT_SHA
-    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:$CI_COMMIT_SHORT_SHA
-    # Tag with escaped branch name as well, e.g. feature/branch -> feature-branch
-    - docker tag stackimage hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:${CI_COMMIT_REF_NAME//\//-}
-    - docker push hub.cc-asp.fraunhofer.de/$FHGHARBORPROJECTNAME/mmm-stack:${CI_COMMIT_REF_NAME//\//-}
-
 update-python-package:
   only:
     - main
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
+  image: $DEBIAN_IMAGE
   stage: deploy
-  tags:
-    - docker
-  # Required because otherwise the environment variables are not available
   needs:
     [
       test-no-extras,
       test-mtl-convergence,
       test-extra-api,
       test-extra-export,
+      test-build-package,
       get-version,
     ]
-  before_script:
-    - poetry config virtualenvs.in-project true
-    - poetry config repositories.gitlab ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi
-    - poetry install --with deploy
   script:
-    - poetry run python3 -V
-    - poetry build
-    - poetry publish --repository gitlab --username gitlab-ci-token --password ${CI_JOB_TOKEN} --skip-existing
+    - uv publish --publish-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi --username gitlab-ci-token --password ${CI_JOB_TOKEN}
 
-test-mmm-installation:
-  only:
-    - main
-  needs: [get-version, update-python-package]
+test-pip-installation:
+  timeout: 5m  # pip is slow, and we want to test this within reasonable time
+  extends: .internal_certs_template
+  needs: [get-version, test-build-package]
   image: $PYTHON_IMAGE
-  variables:
-    MMM_LICENSE_ACCEPTED: "i accept"
   stage: deploy
-  tags:
-    - docker
-  before_script:
-    - apt-get update && apt install python3-opencv -y
   script:
+    - pip3 config set global.index-url $UV_DEFAULT_INDEX
+    - pip3 install "dist/medicalmultitaskmodeling-${PKGVERSION}-py3-none-any.whl" git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git
+    - MMM_LICENSE_ACCEPTED="i accept" python3 -c "from mmm.interactive import *"
     # Install medicalmultitaskmodeling from the Gitlab registry
-    - pip install MedicalMultitaskModeling==$PKGVERSION --index-url https://gitlab-ci-token:${CI_JOB_TOKEN}@$(echo ${CI_API_V4_URL} | sed 's|https://||')/projects/${CI_PROJECT_ID}/packages/pypi/simple
-    - python -c "from mmm.interactive import *"
+    # - pip install git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git MedicalMultitaskModeling==$PKGVERSION --index-url https://gitlab-ci-token:${CI_JOB_TOKEN}@$(echo ${CI_API_V4_URL} | sed 's|https://||')/projects/${CI_PROJECT_ID}/packages/pypi/simple
+    # - python -c "from mmm.interactive import *"
 
-update-python-package-public:
-  when: manual
-  only:
-    - release
-  image: hub.cc-asp.fraunhofer.de/medicalmultitaskmodeling/mmm-stack:$PKGVERSION
-  stage: deploy
-  tags:
-    - docker
-  needs:
-    [
-      test-no-extras,
-      test-mtl-convergence,
-      test-extra-api,
-      test-extra-export,
-      get-version,
-    ]
-  before_script:
-    - poetry config virtualenvs.in-project true
-    - poetry install --with deploy
-  script:
-    - poetry run python3 -V
-    - poetry build
-    - poetry publish --username __token__ --password ${PYPI_TOKEN}
+# update-python-package-public:
+#   when: manual
+#   only:
+#     - release
+#   image: $PYTHON_IMAGE
+#   stage: deploy
+#   needs:
+#     [
+#       test-no-extras,
+#       test-mtl-convergence,
+#       test-extra-api,
+#       test-extra-export,
+#       get-version,
+#     ]
+#   before_script:
+#     - pipx install uv
+#     - uv sync --with deploy
+#   script:
+#     - uv run python3 -V
+#     - poetry build
+#     - poetry publish --username __token__ --password ${PYPI_TOKEN}
 
-test-mmm-installation-public:
-  only:
-    - release
-  needs: [get-version, update-python-package-public]
-  image: $PYTHON_IMAGE
-  variables:
-    MMM_LICENSE_ACCEPTED: "i accept"
-  stage: deploy
-  tags:
-    - docker
-  before_script:
-    - apt-get update && apt install python3-opencv -y
-  script:
-    - pip install MedicalMultitaskModeling==$PKGVERSION
-    - python -c "from mmm.interactive import *"
+# test-mmm-installation-public:
+#   only:
+#     - release
+#   needs: [get-version, update-python-package-public]
+#   image: $PYTHON_IMAGE
+#   variables:
+#     MMM_LICENSE_ACCEPTED: "i accept"
+#   stage: deploy
+#   before_script:
+#     - apt-get update && apt install python3-opencv -y
+#   script:
+#     - pip install MedicalMultitaskModeling==$PKGVERSION
+#     - python -c "from mmm.interactive import *"

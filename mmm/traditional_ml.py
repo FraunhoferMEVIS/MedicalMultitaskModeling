@@ -1,21 +1,16 @@
-from typing import cast
-import numpy as np
-import wandb
 import logging
+from typing import cast
+
+import numpy as np
+import torch
+import wandb
+from scipy.stats import kendalltau
 from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.svm import SVC, SVR
-from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    roc_auc_score,
-    f1_score,
-    mean_squared_error,
-)
-from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
-import torch
-from scipy.stats import kendalltau
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, mean_squared_error, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC, SVR
 
 
 def evaluate_on_clf_arrays(

@@ -1,24 +1,25 @@
-from typing import Literal, Any
-import re
 import logging
 import random
-from pydantic import Field
+import re
 from copy import deepcopy
-from shapely.geometry import Polygon
+from typing import Any, Literal
+
 import numpy as np
-from tiffslide import TiffSlide
 import torch
 import torchvision.transforms.functional as F
+from m3_sdk.geojson import GeoAnno
+from pydantic import Field
+from shapely.geometry import Polygon
+from tiffslide import TiffSlide
 
 from mmm.BaseModel import BaseModel
-from mmm.bucketizing import BucketConfig, Bucket
+from mmm.bucketizing import Bucket, BucketConfig
 
-from .GeoAnno import GeoAnno
 from .utils import (
+    extract_detection_labels,
     move_anno_to_window,
     rasterize_annotations,
     rasterize_multilabel_annotations,
-    extract_detection_labels,
 )
 
 ObjectLabelType = Literal["det", "seg", "mlsemseg"]

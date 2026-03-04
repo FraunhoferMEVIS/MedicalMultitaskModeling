@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-import json
 import logging
-import random
-from ast import Not
-from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Type
+from typing import Any, Dict, List, Literal, Optional, Tuple, Type
 
 import numpy as np
 import torch
 import torch.nn as nn
 import wandb
-from mmm.data_loading.ClassificationDataset import ClassificationDataset
-from mmm.data_loading.TrainValCohort import TrainValCohort
-from mmm.logging.type_ext import StepMetricDict
-from mmm.logging.wandb_ext import build_wandb_image_for_clf
-from mmm.mtl_modules.shared_blocks.Grouper import Grouper, make_grid_for_supercase
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
-from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
-from mmm.neural import CrossEntropyLossConfig, LossConfigs
-from mmm.settings import mtl_settings
-from mmm.utils import flatten_list_of_dicts
 from PIL.Image import Image as PIL_Image
 from pydantic import Field
 from sklearn.metrics import (
@@ -33,7 +20,21 @@ from sklearn.metrics import (
 from torch.utils.data import Dataset
 from typing_extensions import Annotated
 
+from mmm.data_loading.ClassificationDataset import ClassificationDataset
+from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.logging.batch_visualization import visualize_batch
+from mmm.logging.type_ext import StepMetricDict
+from mmm.mmm_types.GroupUsage import GroupUsage
+from mmm.mtl_modules.shared_blocks.Grouper import Grouper
+from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
+from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
+from mmm.neural import CrossEntropyLossConfig, LossConfigs
+from mmm.settings import mtl_settings
+from mmm.utils import flatten_list_of_dicts
+
 from .MTLTask import MTLTask
+
+CLF_METRICS = Literal["confusion matrix", "accuracy", "top5accuracy", "auc", "f1", "kappa"]
 
 
 class ClassificationTask(MTLTask):
@@ -49,17 +50,17 @@ class ClassificationTask(MTLTask):
     class Config(MTLTask.Config):
         encoder_key: str = "encoder"
         squeezer_key: str = "squeezer"
-        grouper_key: str = Field(
-            default="",
-            description="If set, assumes a grouper to exist in the shared modules.",
+        grouper_key: GroupUsage = Field(
+            default=GroupUsage(grouper_key=""),
+            description="If the key is set, assumes a grouper to exist in the shared modules.",
         )
         loss_fn: Annotated[LossConfigs, Field(discriminator="loss_type")] = CrossEntropyLossConfig()
         dropout: float = 0.2
-        metrics: Optional[List[Literal["confusion matrix", "accuracy", "top5accuracy", "auc", "f1", "kappa"]]] = Field(
+        metrics: Optional[List[CLF_METRICS]] = Field(
             default=None,
             description="If none, the task will decide which metrics make sense",
         )
-        head: Literal["pretraining", "smart"] = "pretraining"
+        head: Literal["pretraining", "pretraining_gelu"] = "pretraining"
 
     @classmethod
     def from_torchvision_style(
@@ -95,12 +96,10 @@ class ClassificationTask(MTLTask):
         self.class_names = cohort.datasets[0].get_classes_for_visualization()
         self.hidden_dim = hidden_dim
 
-        if self.args.head == "pretraining":
-            self.task_modules = self._create_pretraining_head()
-        else:
-            self.task_modules = self._create_smart_head()
+        self.task_modules = self._create_pretraining_head()
+        self.task_modules.update(self._build_context_modules(self.hidden_dim))
 
-        self._grouper_weights = None
+        self._grouper_meta = None
         self.flatten = nn.Flatten(1)
         self.criterion: nn.Module = self.args.loss_fn.build_instance()
 
@@ -110,27 +109,8 @@ class ClassificationTask(MTLTask):
             {
                 "classification_head": nn.Sequential(
                     nn.Dropout(p=self.args.dropout),
-                    nn.ReLU(),
+                    nn.ReLU() if self.args.head == "pretraining" else nn.GELU(),
                     nn.Linear(self.hidden_dim, out_dim),
-                )
-            }
-        )
-        return new_dict
-
-    def _create_smart_head(self) -> nn.ModuleDict:
-        out_dim = len(self.class_names)
-        new_dict = nn.ModuleDict(
-            {
-                "classification_head": nn.Sequential(
-                    nn.Dropout(p=self.args.dropout),
-                    nn.ReLU(),
-                    nn.Linear(
-                        max(out_dim * 4, self.hidden_dim),
-                        max(out_dim * 4, self.hidden_dim // 2),
-                    ),
-                    nn.Dropout(p=self.args.dropout),
-                    nn.ReLU(),
-                    nn.Linear(self.hidden_dim // 2, out_dim),
                 )
             }
         )
@@ -142,118 +122,135 @@ class ClassificationTask(MTLTask):
         return batch
 
     def forward(self, inputs, shared_blocks: Dict[str, SharedBlock]):
-        x, supercase_indexes = inputs
-        pyr = shared_blocks[self.args.encoder_key](x)
-        _, hidden_vector = shared_blocks[self.args.squeezer_key](pyr)
-        hidden_vector = self.flatten(hidden_vector)
+        # Enable image, supercase_indices for backward compatibility
+        x, supercase_indexes, contexts = inputs if len(inputs) == 3 else (inputs[0], inputs[1], None)
 
-        if self.args.grouper_key:
-            hidden_vector, self._grouper_weights = shared_blocks[self.args.grouper_key](
-                hidden_vector, supercase_indexes
+        if ClassificationDataset.batch_is_compressed(x):
+            hidden_vector = x
+        else:
+            pyr = shared_blocks[self.args.encoder_key](x)
+            _, hidden_vector = shared_blocks[self.args.squeezer_key](pyr)
+            hidden_vector = self.flatten(hidden_vector)
+
+        if (
+            hasattr(self.args, "token_contexts") and len(self.args.token_contexts) > 0
+        ):  # Only if there is at least one context which should be used
+            for ctx in self.args.token_contexts:
+                ctx_item = [c[ctx.index_in_context] for c in contexts]
+                hidden_vector = self.task_modules[f"{ctx.index_in_context}"](hidden_vector, ctx_item)
+
+        if self.args.grouper_key.grouper_key:
+            if hasattr(self.args, "positions") and self.args.positions is not None:
+                positions = [c[self.args.positions[0]] for c in contexts]
+            else:
+                positions = None
+            hidden_vector, self._grouper_meta = shared_blocks[self.args.grouper_key.grouper_key](
+                hidden_vector, supercase_indexes, self.args.grouper_key, positions=positions
             )
 
         out = self.task_modules["classification_head"](hidden_vector)
         return out
 
-    def training_step(self, batch: Dict[str, Any], shared_blocks: SharedModules):
-        x = batch["image"]
-        y = batch["class"]
+    def training_step(self, batch: dict[str, Any], shared_blocks: SharedModules):
+        x: torch.Tensor = batch["image"]
+        y: torch.Tensor = batch["class"]
+        metas = batch.get("meta", [{} for _ in range(batch["image"].shape[0])])
 
-        # skip if batch is empty
-        tensornums = [bool(t.numel()) for t in x]
-        if not True in tensornums:
+        if not True in [bool(t.numel()) for t in x]:  # skip if batch is empty
             logging.info("encountered batch without valid training examples, skipping batch")
             return None
 
         # If a grouper is used, extract supercase_indices
-        if self.args.grouper_key:
+        group_ids = [x.get("group_id") for x in metas]
+        contexts = [x.get("context") for x in metas]
+        supercase_indices = Grouper.extract_ids_from_batch(group_ids, for_task_name=self.get_name()).to(
+            self.torch_device
+        )
+        if self.args.grouper_key.grouper_key:
             # A batch with ids ["id1", "s3", "s3"] would become [0, 1, 1]
-            grouper: Grouper = shared_blocks.module.shared_modules[self.args.grouper_key]
-            supercase_indices = grouper.extract_ids_from_batch([x["group_id"] for x in batch["meta"]]).to(
-                self.torch_device
-            )
+            grouper: Grouper = shared_blocks.module.shared_modules[self.args.grouper_key.grouper_key]  # type: ignore
 
             # the targets need to be grouped as well, currently y is a (B,) tensor with class indices
             # For each unique supercase index, we need to find the corresponding class index
-            y = grouper.group_targets(y, supercase_indices)
-        else:
-            supercase_indices = None
+            y = grouper.group_targets(y, supercase_indices, self.args.grouper_key)
 
-        y_hat = shared_blocks.forward((x, supercase_indices), self.forward)
+        y_hat = shared_blocks.forward((x, supercase_indices, contexts), self.forward)
         batch_loss = self.criterion(y_hat, y) / np.log(len(self.class_names))
 
         step_results: StepMetricDict = {  # type: ignore (.numpy() does not correctly indicate numpy array)
             "targets": y.cpu().numpy(),
-            "logits": y_hat.detach().cpu().numpy(),
-            "preds": torch.argmax(y_hat.detach().cpu(), dim=1).numpy(),
+            "logits": y_hat.detach().cpu().float().numpy(),
+            "preds": torch.argmax(y_hat.detach().cpu().float(), dim=1).numpy(),
         }
         self.add_step_result(batch_loss.item(), step_results)
 
-        live_vis = self._visualize_preds(
-            x.detach().cpu(),
-            step_results,
-            (batch["meta"] if "meta" in batch else [{} for _ in range(batch["image"].shape[0])]),
-            supercase_indices=supercase_indices,
-        )
-
-        return batch_loss, live_vis
-
-    def _visualize_preds(
-        self, training_ims, step_metrics: dict, metas: list[dict], supercase_indices
-    ) -> Dict[str, Any]:
-        vis_n = min(self._takeout_vis_budget(), training_ims.size(0))
-
-        if vis_n <= 0:
-            return {}
-
-        img = training_ims[0]
-        if img.shape[0] == 3:
-            # Select one of the groups for visualization
-            if supercase_indices is not None:
-                group_index = random.choice(list(set(supercase_indices.cpu().numpy())))
-                vis_indices = torch.where(supercase_indices == group_index)[0].cpu()
-                grid_img, weight_str, vis_indices = make_grid_for_supercase(
-                    training_ims, supercase_indices, group_index, self._grouper_weights
+        realtime_log = {}
+        if self.ask_for_visualization():
+            batch_info = {}
+            if self._grouper_meta is not None:
+                batch_info.update(
+                    {
+                        "group_id_to_index": {g: supercase_indices[i].item() for i, g in enumerate(group_ids)},
+                        "grouper_meta": self._grouper_meta,
+                        "graphs": {
+                            "attn_avg": self._grouper_meta["attn_weights"].mean(dim=1),  # average heads
+                            "lastweights_avg": self._grouper_meta["lastweights"].mean(dim=1),  # average heads
+                        },
+                    }
                 )
-                caption = f"""
-                Group {group_index} with {len(vis_indices)} subcases, group id: {metas[0]["group_id"]}
-                weights:{weight_str}
-                logits:{step_metrics["logits"][group_index]}
-                """
-                wandb_img, description, true_str, pred_str = build_wandb_image_for_clf(
-                    grid_img,
-                    step_metrics["targets"][group_index],
-                    step_metrics["preds"][group_index],
-                    self.class_names,
-                    caption_suffix=caption,
-                )
-                return {"preds": [wandb_img]}
-            else:
-                preds = []
-                for rand_index in random.sample(list(range(training_ims.size(0))), vis_n):
-                    metastr = json.dumps(metas[rand_index], default=lambda o: str(o))
-                    wandb_img, description, true_str, pred_str = build_wandb_image_for_clf(
-                        training_ims[rand_index],
-                        step_metrics["targets"][rand_index],
-                        step_metrics["preds"][rand_index],
-                        self.class_names,
-                        caption_suffix=metastr,
-                    )
-                    preds.append(wandb_img)
-                return {"preds": preds} if preds else {}
-        else:
-            idx = np.random.choice(len(training_ims))
-            nic = training_ims[idx]
-            meta = metas[idx]
-            metastr = json.dumps(meta, default=lambda o: str(o))
-            fmap_index = np.random.choice(nic.shape[0], 3)  # random.randint(0, nic.shape[0] - 1)
-            return {"fmap": wandb.Image(nic[fmap_index], caption=metastr)}
+            log = visualize_batch(
+                x.detach().cpu(),
+                metas,
+                captions=[
+                    f"""target = {step_results["targets"][i]} ({self.class_names[step_results["targets"][i].item()]}),
+<br>pred = {step_results["preds"][i]} ({self.class_names[step_results["preds"][i].item()]}),
+<br>logits = {step_results["logits"][i]}"""
+                    for i in range(x.shape[0])
+                ],
+                batch_info=batch_info,
+            )
+            log.upload()
+            realtime_log["preds"] = log.build_instruction()
+
+        return batch_loss, realtime_log
 
     def _get_short_class_names(self, max_length=10):
         if True in [len(c) > max_length for c in self.class_names]:
             return [f"{i};{c[:max_length]}" for i, c in enumerate(self.class_names)]
         else:
             return self.class_names
+
+    @staticmethod
+    def compute_metrics(y_true, y_pred, y_score: np.ndarray | None, selected_metrics, plot_info: dict | None = None):
+        log_dict, print_str = {}, ""
+        if "accuracy" in selected_metrics:
+            log_dict["acc"] = accuracy_score(y_true=y_true, y_pred=y_pred)
+            log_dict["acc_balanced"] = balanced_accuracy_score(y_true=y_true, y_pred=y_pred)
+            print_str = f"{print_str} - acc: {log_dict['acc']}"
+
+        if "auc" in selected_metrics and y_score is not None:
+            try:
+                log_dict["auc"] = roc_auc_score(
+                    y_true, y_score[:, 1] if y_score.shape[1] == 2 else y_score, multi_class="ovr"
+                )
+
+                print_str = f"{print_str} - auc: {log_dict['auc']}"
+            except ValueError as e:
+                logging.warning(f"Computing auc failed with {e}")
+
+        if "confusion matrix" in selected_metrics:
+            log_dict["confmat"] = wandb.plot.confusion_matrix(
+                preds=y_pred,  # type: ignore
+                y_true=y_true,  # type: ignore
+                class_names=plot_info.get("classnames", [f"C{i}" for i in range(len(np.unique(y_true)))]),
+                title=plot_info.get("confmat_title", "Confusion Matrix"),
+            )
+
+        if "f1" in selected_metrics:
+            log_dict["f1"] = f1_score(y_true=y_true, y_pred=y_pred, average="macro")
+            log_dict["f1_weighted"] = f1_score(y_true=y_true, y_pred=y_pred, average="weighted")
+
+        return log_dict, print_str
 
     def log_epoch_metrics(self) -> Tuple[Dict[str, Any], str]:
         metrics = flatten_list_of_dicts(self._step_metrics)
@@ -272,12 +269,19 @@ class ClassificationTask(MTLTask):
             selected_metrics = self.args.metrics
 
         _, print_str = super().log_epoch_metrics()
-        log_dict = {}
 
-        if "accuracy" in selected_metrics:
-            log_dict["acc"] = accuracy_score(y_true=metrics["targets"], y_pred=metrics["preds"])
-            log_dict["acc_balanced"] = balanced_accuracy_score(y_true=metrics["targets"], y_pred=metrics["preds"])
-            print_str = f"{print_str} - acc: {log_dict['acc']}"
+        scores = nn.Softmax(dim=1)(torch.from_numpy(metrics["logits"]).float())
+        log_dict, standard_metrics_printstr = self.compute_metrics(
+            metrics["targets"],
+            metrics["preds"],
+            scores,
+            selected_metrics,
+            plot_info={
+                "classnames": self._get_short_class_names(),
+                "confmat_title": f"{self._prefix}_{self.get_name()}",
+            },
+        )
+        print_str = f"{print_str} {standard_metrics_printstr}"
 
         if "top5accuracy" in selected_metrics:
             classes_in_loop = np.unique(metrics["targets"])
@@ -290,32 +294,6 @@ class ClassificationTask(MTLTask):
             )
             print_str = f"{print_str} - top5acc: {log_dict['top5acc']}"
 
-        if "auc" in selected_metrics:
-            # Binary classification
-            if metrics["logits"].shape[1] == 2:
-                preds = nn.Softmax(dim=1)(torch.from_numpy(metrics["logits"]))[:, 1]
-            else:
-                preds = nn.Softmax(dim=1)(torch.from_numpy(metrics["logits"]))
-
-            try:
-                log_dict["auc"] = roc_auc_score(metrics["targets"], preds, multi_class="ovr")
-
-                print_str = f"{print_str} - auc: {log_dict['auc']}"
-            except ValueError as e:
-                logging.warn(f"Computing auc failed with {e}")
-
-        if "confusion matrix" in selected_metrics:
-            log_dict["confmat"] = wandb.plot.confusion_matrix(
-                preds=metrics["preds"],  # type: ignore
-                y_true=metrics["targets"],  # type: ignore
-                class_names=self._get_short_class_names(),
-                title=f"{self._prefix}_{self.get_name()}",
-            )
-
-        if "f1" in selected_metrics:
-            log_dict["f1"] = f1_score(y_true=metrics["targets"], y_pred=metrics["preds"], average="macro")
-            log_dict["f1_weighted"] = f1_score(y_true=metrics["targets"], y_pred=metrics["preds"], average="weighted")
-
         if "kappa" in selected_metrics:
             log_dict["kappa_linear"] = cohen_kappa_score(y1=metrics["targets"], y2=metrics["preds"], weights="linear")
             log_dict["kappa_quadratic"] = cohen_kappa_score(
@@ -323,3 +301,14 @@ class ClassificationTask(MTLTask):
             )
 
         return log_dict, print_str
+
+    def needs_shared_blocks(self):
+        res = [
+            self.args.encoder_key,
+            self.args.squeezer_key,
+        ]
+
+        if self.args.grouper_key.grouper_key:
+            res.append(self.args.grouper_key.grouper_key)
+
+        return res

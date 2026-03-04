@@ -1,13 +1,15 @@
-from typing import List, Tuple, Literal
+from typing import List, Literal, Tuple
+
 import torch
 import torch.nn as nn
 
-from ..TorchModule import TorchModule
-from ..model_protocols import EncoderModel
 from mmm.BaseModel import BaseModel
+from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.neural.activations import ActivationFn, ActivationFunctionConfig
 from mmm.torch_ext import infer_stride_channels_from_features
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
+
+from ..model_protocols import EncoderModel
+from ..TorchModule import TorchModule
 
 
 class ConvNormActivation(nn.Module):

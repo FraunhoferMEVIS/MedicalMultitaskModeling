@@ -1,12 +1,13 @@
-from pathlib import Path
-import numpy as np
-import torch
 import hashlib
 import os
 import time
+from pathlib import Path
 
-from mmm.utils import recursive_equality, disk_cacher
+import numpy as np
+import torch
+
 from mmm.data_loading.utils import train_val_split_class_dependent
+from mmm.utils import disk_cacher, recursive_equality
 
 
 def test_recursive_equality():

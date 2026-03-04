@@ -5,7 +5,7 @@ try:  # catch for pytest
 
     with open("pyproject.toml") as f:
         parsed_toml = toml.load(f)
-    version = parsed_toml["tool"]["poetry"]["version"]
+    version = parsed_toml["project"]["version"]
 
     print(version)
 except ImportError:

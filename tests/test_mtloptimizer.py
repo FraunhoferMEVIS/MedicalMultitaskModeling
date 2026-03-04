@@ -1,15 +1,17 @@
-import pytest
 from typing import Callable, get_args
+
+import pytest
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
 from mmm.optimization.MTLOptimizer import (
     MTLOptimizer,
     OptimizerType,
-    OptimizerConfig,
-    SchedulerConfig,
     ReduceLROnPlateauConfig,
+    SchedulerConfig,
+    SchedulerType,
 )
 
 
@@ -31,6 +33,11 @@ def minimal_default_optim(default_optim_config):
 def test_optim_from_config(minimal_default_optim):
     o, optim_config = minimal_default_optim
     assert o.param_groups[0]["lr"] == optim_config.lr
+
+
+@pytest.fixture(params=[schedulerconfig for schedulerconfig in get_args(SchedulerType)])
+def default_scheduler_config(request):
+    return request.param
 
 
 def test_scheduler_from_config(default_scheduler_config: Callable[[], SchedulerConfig], minimal_default_optim):

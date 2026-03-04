@@ -1,5 +1,20 @@
+"""
+The convergence tests are in a separate file for filtering them into a GPU-enabled environment.
+"""
+
 import numpy as np
+
 from mmm.trainer.MTLTrainer import MTLTrainer
+
+from .test_mtl_training import (
+    mtl_semseg_trainer_factory,
+    shape_segtask_factory,
+    shape_semseg_cohort,
+    default_optim_config,
+    default_encoder_factory,
+    default_squeezer_factory,
+    default_decoder_factory,
+)
 
 
 def test_train_epoch(mtl_semseg_trainer_factory):

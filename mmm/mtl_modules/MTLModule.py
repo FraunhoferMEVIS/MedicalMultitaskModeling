@@ -1,12 +1,14 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Literal, Optional
+
 import torch
 import torch.nn as nn
-from mmm.BaseModel import BaseModel
 from torchinfo import ModelStatistics, summary
 from torchinfo.layer_info import LayerInfo
+
+from mmm.BaseModel import BaseModel
 
 
 class MTLModule(nn.Module):

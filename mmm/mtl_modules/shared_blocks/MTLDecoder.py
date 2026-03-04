@@ -1,11 +1,12 @@
 from typing import List
-import torch
-import numpy as np
-import torch.nn.functional as F
-import torch.nn as nn
 
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
+from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 
 
 class SCSEModule(nn.Module):

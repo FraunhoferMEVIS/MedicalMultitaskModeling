@@ -1,6 +1,7 @@
-import os
-import requests
 import json
+import os
+
+import requests
 
 
 def get_nomad_allocations():

@@ -1,6 +1,7 @@
-from typing import Dict, Any, Sequence, Union
-import numpy as np
+from typing import Any, Dict, Sequence, Union
+
 import albumentations as A
+import numpy as np
 
 # A step metric dict can be aggregated by concatenating the arrays for each key
 # using `utils.flatten_list_of_dicts`

@@ -1,45 +1,33 @@
 from __future__ import annotations
 
-import logging
 import json
+import logging
+import time
+import traceback
 from abc import abstractmethod
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Tuple,
-    Literal,
-    Union,
-)
-from typing_extensions import Annotated
+from contextlib import nullcontext
 from datetime import datetime
-from mmm.BaseModel import BaseModel
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+
+import logfire
+import torch
+import torch.distributed as dist
+import wandb
+from m3_sdk.models import TrainingStepEvent
 from pydantic import Field
 from tqdm.auto import tqdm
+from typing_extensions import Annotated
 
-import torch
-from torch.cuda import OutOfMemoryError
-import time
-import wandb
-
-from mmm.mtl_modules.MTLModule import MTLModule
-from mmm.optimization.MTLOptimizer import MTLOptimizer
-from mmm.task_sampling import (
-    BaseSampler,
-    TaskSamplerTypes,
-    TaskSamplerConfig,
-    CyclicTaskSampler,
-    BalancedTaskSampler,
-)
-from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.BaseModel import BaseModel
+from mmm.DataSplit import DataSplit
+from mmm.event_selectors import EventSelector, FixedEventSelector, RecurringEventSelector
+from mmm.logging.type_ext import StepFeedbackDict
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
-from mmm.DataSplit import DataSplit
-from mmm.logging.type_ext import StepFeedbackDict
-import torch.distributed as dist
+from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.optimization.MTLOptimizer import MTLOptimizer
+from mmm.settings import mtl_settings
+from mmm.task_sampling import BalancedTaskSampler, BaseSampler, CyclicTaskSampler, TaskSamplerConfig, TaskSamplerTypes
 
 
 class FixedMultistep(BaseModel):
@@ -66,13 +54,15 @@ MultistepMode = Union[FixedMultistep, LinearMultistep]
 
 
 class LoopLogConfig(BaseModel):
-    # log_gradients_mode: Literal['every_500', 'every_update_step', 'once_per_epoch'] = 'every_500'
+    progress_bar: bool = True
     print_dateformat: str = "%H:%M.%S"
     log_result: bool = Field(
         default=True,
         description="If true, logs more detailed statistics after the loop",
     )
-    include_mem: bool = False
+    include_mem: Annotated[EventSelector, Field(discriminator="selector_type")] = FixedEventSelector(
+        at_iterations=[0, 1, 2]
+    )
 
 
 class LoopConfig(BaseModel):
@@ -148,6 +138,7 @@ class Loop:
         optim: Optional[MTLOptimizer] = None,
         rank: int = 0,
         syncon_syncoff: Optional[Tuple[Callable, Callable]] = None,
+        eventqueue: str = "",
     ) -> None:
         self.args: LoopConfig = args
         self.epoch: int = epoch
@@ -161,6 +152,7 @@ class Loop:
         self.accumulate_losses_for_steps = accumulate_losses_for_steps
         self.rank = rank
         self.one_update_per_task = self.accumulate_losses_for_steps == len(self.task_sampler.tasks)
+        self.eventqueue: str = eventqueue
         if syncon_syncoff is None:
             self.sync_on, self.sync_off = None, None
         else:
@@ -176,8 +168,8 @@ class Loop:
     def drain(self) -> List[float]:
         return [x for _, x in self]
 
-    def drain_to_dict(self) -> Dict[MTLTask, List[float]]:
-        res: Dict[MTLTask, List[float]] = {t: [] for t in self.task_sampler.tasks}
+    def drain_to_dict(self) -> dict[MTLTask, list[float]]:
+        res: dict[MTLTask, list[float]] = {t: [] for t in self.task_sampler.tasks}
         for task, task_loss in self:
             res[task].append(task_loss)
         return res
@@ -204,13 +196,9 @@ class Loop:
             shared_block.prepare_epoch(self.epoch, self.prefix, training_mode=self.training_mode)
             assert shared_block._made_mtl_compatible, f"{shared_block} not yet MTL compatible"
 
-        frozen_blocks = [
-            f"{m.get_name()}: {m.training=}"  # type: ignore
-            for m in self.shared_blocks.module.shared_modules.values()
-            if not m.training == self.training_mode
-        ]
+        frozen_blocks = [f"{m.get_name()}: {m.training=}" for m in self.shared_blocks.module.shared_modules.values() if not m.training == self.training_mode]  # type: ignore
         if frozen_blocks:
-            logging.warning(f"Assuming frozen blocks, because loop is in {self.training_mode=}: {frozen_blocks}")
+            logging.info(f"Assuming frozen blocks, because loop is in {self.training_mode=}: {frozen_blocks}")
 
         for task in self.task_sampler.tasks:
             assert task is not None
@@ -254,6 +242,14 @@ class Loop:
         return f"p{self.rank}_{self.prefix}_e{self.epoch}: {', '.join(task_statuses)}"
 
     def __iter__(self):
+        try:
+            import redis
+
+            redis.Redis.from_url(mtl_settings.redis_url).ping()
+            db_available = True
+        except Exception as e:
+            db_available = False
+            logfire.info("Not publishing loop stats to DB", exception=e)
         self._prepare_loop()
 
         iteration_start_time, is_update_step = time.perf_counter(), False
@@ -271,16 +267,30 @@ class Loop:
                 total=self.__len__() if self.has_len() else None,
                 leave=self.args.log_args.log_result,
                 position=self.rank,
+                disable=not self.args.log_args.progress_bar,
             ) as pbar:
                 for i, (batch, task) in enumerate(task_iterator):
-                    batch_extraction_ms = time.perf_counter() - iteration_start_time
-                    before_mem = torch.cuda.memory_allocated()
+                    if (batch_extraction_s := time.perf_counter() - iteration_start_time) > 1.0:
+                        logfire.warning(
+                            "Task {task_name} on rank {rank} blocked for {batch_extraction_s:.2f} s in iteration {i}",
+                            task_name=task.get_name(),
+                            rank=self.rank,
+                            batch_extraction_s=batch_extraction_s,
+                            i=i,
+                        )
+                    mtl_dataset = task.cohort.datasets[self.task_sampler.loader_index.value]
+                    if db_available and i != 0:  # the first iteration often hangs
+                        with mtl_settings.kv.pipeline() as pipe:
+                            k = mtl_dataset.loader_info.get_cache_key("batch_extraction_s")
+                            pipe.lpush(k, batch_extraction_s)
+                            pipe.ltrim(k, 0, 100)
 
-                    # is_last_step = i >= self.__len__() - 1
+                            pipe.execute()
+
                     is_update_step = (self.has_len() and (i >= self.__len__() - 1)) or (
-                        i % self.accumulate_losses_for_steps == 0
-                    )
-                    is_update_step = self.training_mode and is_update_step and (i > 0)
+                        i % self.accumulate_losses_for_steps == (self.accumulate_losses_for_steps - 1)
+                    )  # either the last step in the loop or an update step
+                    is_update_step = self.training_mode and is_update_step  # Do update steps only during training
 
                     assert task.training == self.training_mode
                     # Set active task for all shared blocks
@@ -291,21 +301,25 @@ class Loop:
                     if self.training_mode and is_update_step and (self.sync_on is not None):
                         # the forward step needs to know if a sync will happen, so turn on sync here already
                         self.sync_on()
-                    # with Join([self.shared_blocks], enable=False):
-                    try:
-                        task_step_result = self.task_step(batch, task)
-                    except RuntimeError as e:
-                        if "out of memory" in str(e):
-                            logging.error(
-                                f"Task {task.get_name()} on rank {self.rank} encountered {e}, reduce size of {batch}!"
-                            )
-                            raise e
-                        else:
-                            torch.save(batch, f"batch_{self.rank}.pt")
-                            logging.error(
-                                f"Encountered runtimeerror {e} with task {task.get_name()} on rank {self.rank}!"
-                            )
-                            raise e
+
+                    with logfire.span(
+                        "Running step for {task_name} on rank {rank}", task_name=task.get_name(), rank=self.rank
+                    ):
+                        try:
+                            with self.optim.forward_context if self.training_mode else nullcontext():
+                                task_step_result = self.task_step(batch, task)
+                        except Exception as e:
+                            if "out of memory" in str(e):
+                                logfire.error(
+                                    "Task {task_name} on rank {self.rank} encountered {e}, reduce size of {batch}!",
+                                    task_name=task.get_name(),
+                                )
+                                raise e
+                            else:
+                                logfire.error(
+                                    f"Encountered exception {e} with task {task.get_name()} on rank {self.rank}!"
+                                )
+                                raise e
 
                     if task_step_result is not None:
                         task_step_loss, task_log_dict = task_step_result
@@ -313,26 +327,17 @@ class Loop:
                         if torch.isnan(task_step_loss).item():
                             raise Exception(f"Got a nan loss for \n{batch}\n in task: \n {task}")
 
-                        before_backward_mem = torch.cuda.memory_allocated()
                         if self.training_mode:
-                            task_step_loss.backward()
                             # Updates the task head if there is exactly one update per task in each iteration
-                            self.optim.after_backward(
-                                of_task=task,
-                                reduce_task_immediately=self.one_update_per_task,
-                            )
+                            self.optim.run_backward(task_step_loss)
+                            self.optim.after_backward(of_task=task, reduce_task_immediately=self.one_update_per_task)
                             if self.sync_off is not None:
                                 self.sync_off()
-                        after_backward_mem = torch.cuda.memory_allocated()
 
                         if is_update_step:
-                            # print("Finding unused parameters:")
-                            # for name, param in self.shared_blocks.named_parameters():
-                            #     if param.grad is None:
-                            #         print(name)
                             do_update_step()
 
-                        network_passes_ms = time.perf_counter() - iteration_start_time - batch_extraction_ms
+                        network_passes_s = time.perf_counter() - iteration_start_time - batch_extraction_s
 
                         step_prefix = f"{self.prefix}step"
                         task_uniqueness = f"_{task.get_name()}"
@@ -342,6 +347,9 @@ class Loop:
                             f"{step_prefix}loss/batch_loss{task_uniqueness}": task_step_loss.item(),
                         }
 
+                        if is_update_step and self.optim.scaler.get_scale() != 1:
+                            step_log_dict["general/grad_scale"] = self.optim.scaler.get_scale()
+
                         if self.args.log_args.log_result:
                             task_log_dict = {
                                 f"{task.get_name()}/{step_prefix}.{k}": v for k, v in task_log_dict.items()
@@ -350,27 +358,32 @@ class Loop:
 
                         step_log_dict.update(
                             {
-                                f"{step_prefix}time/batchextraction_time{task_uniqueness}": batch_extraction_ms,
-                                f"{step_prefix}time/networkpasses_time{task_uniqueness}": network_passes_ms,
-                                f"{step_prefix}time/fulliteration_time{task_uniqueness}": network_passes_ms
-                                + batch_extraction_ms,
+                                f"{step_prefix}time/batchextraction_time{task_uniqueness}": batch_extraction_s,
+                                f"{step_prefix}time/networkpasses_time{task_uniqueness}": network_passes_s,
+                                f"{step_prefix}time/fulliteration_time{task_uniqueness}": network_passes_s
+                                + batch_extraction_s,
                             }
                         )
 
-                        if self.args.log_args.include_mem:
+                        if self.args.log_args.include_mem.is_event(self.epoch):
                             mem_pref = f"{step_prefix}memory/"
-                            step_log_dict[f"{mem_pref}afterstep{task_uniqueness}"] = torch.cuda.memory_allocated() / (
-                                1024**3
-                            )
-                            step_log_dict[f"{mem_pref}beforestep{task_uniqueness}"] = before_mem / (1024**3)
-                            step_log_dict[f"{mem_pref}beforeback{task_uniqueness}"] = before_backward_mem / (1024**3)
-                            step_log_dict[f"{mem_pref}afterback{task_uniqueness}"] = after_backward_mem / (1024**3)
+                            step_log_dict[
+                                f"{mem_pref}allocated{task_uniqueness}"
+                            ] = torch.cuda.max_memory_allocated() / (1024**2)
+                            torch.cuda.reset_peak_memory_stats()
 
                         wandb.log(step_log_dict)
+                        if self.eventqueue:
+                            mtl_settings.kv.publish(
+                                channel=self.eventqueue,
+                                message=TrainingStepEvent(
+                                    loss=task_step_loss.item(),
+                                ).model_dump_json(),
+                            )
 
                         yield task, task_step_loss.item()
                     else:
-                        logging.warn(f"Task {task.get_name()} wants to skip step {i}")
+                        logging.warning(f"Task {task.get_name()} wants to skip step {i}")
 
                     self.step_counters[self.prefix] += 1
                     iteration_start_time = time.perf_counter()
@@ -381,7 +394,7 @@ class Loop:
                         break
 
             if (not is_update_step) and self.training_mode:
-                assert self.sync_off is None and self.sync_off is None, "Multi GPU not compatible with sudden loop end"
+                assert self.sync_off is None and self.sync_on is None, "Multi GPU not compatible with sudden loop end"
                 # If the last step in the loop was not an update step there is an unused gradient
                 do_update_step()
 

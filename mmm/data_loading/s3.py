@@ -1,30 +1,27 @@
 """
 You can use the common S3 defaults by using the environment variables: S3URL, AWS_ACCESS_KEY_ID, and AWS_SECRET_ACCESS_KEY.
-Use this code:
-
-```python
-client: Minio = Minio(*get_args(), **get_kwargs())
-```
+Then, you can interact with s3 using `minio_client: Minio = mmm.settings.mtl_settings.s3`.
 """
 
 from __future__ import annotations
-from typing import BinaryIO, Callable
-import os
-from pathlib import Path
-from pydantic import Field
-from mmm.utils import disk_cacher
-from mmm.BaseModel import BaseModel
+
+import typing
 from io import BytesIO
+from pathlib import Path
+from typing import Callable
+
 from PIL import Image
+
+from mmm.utils import disk_cacher
 
 try:
     from minio import Minio
-    from minio.error import S3Error
 except ImportError:
-    pass
+    if not typing.TYPE_CHECKING:
+        Minio = None
 
-from torchvision.datasets.folder import make_dataset
 from torchvision.datasets import ImageFolder
+from torchvision.datasets.folder import make_dataset
 
 
 @disk_cacher(cache_path="shared")
@@ -50,20 +47,6 @@ class S3ImageFolder(ImageFolder):
             # is potentially overridden and thus could have a different logic.
             raise ValueError("The class_to_idx parameter cannot be None.")
         return make_dataset_cached(directory, class_to_idx, extensions=extensions, is_valid_file=is_valid_file)
-
-
-def get_args():
-    return (
-        os.getenv("S3URL", default="http://localhost:9000").replace("http://", "").replace("https://", ""),
-        os.getenv("AWS_ACCESS_KEY_ID", default="minioadmin"),
-        os.getenv("AWS_SECRET_ACCESS_KEY", default="minioadmin"),
-    )
-
-
-def get_kwargs():
-    return {
-        "secure": os.getenv("S3URL", default="http://localhost:9000").startswith("https://"),
-    }
 
 
 def download_object(client: Minio, bucket_name: str, object_name: str) -> BytesIO:
@@ -94,14 +77,15 @@ def index_files(bucket_name: str, p: Path, recursive=True) -> list:
     """
     Indexes files in a bucket.
     """
-    client = Minio(*get_args(), **get_kwargs())
+    from mmm.settings import mtl_settings
+
     # The prefix consists of the path except for the first part, which needs to be the bucket name.
     prefix = "/".join(p.parts[2 if p.is_absolute else 1 :])
 
     bucket_path = Path("".join(p.parts[: 2 if p.is_absolute else 1]))
     return [
         bucket_path / object.object_name
-        for object in client.list_objects(bucket_name, prefix=prefix, recursive=recursive)
+        for object in mtl_settings.s3.list_objects(bucket_name, prefix=prefix, recursive=recursive)
     ]
 
 
@@ -124,5 +108,5 @@ def upload_img(
     img_bytes = BytesIO()
     img.save(img_bytes, format=format)
     img_bytes.seek(0)
-    r = mclient.put_object(bucket, f"{prefix}/{img_name}.png", img_bytes, length=img_bytes.getbuffer().nbytes)
-    return {"data": {data_key: f"{base_url}/{bucket}/{prefix}/{img_name}.png"}}
+    r = mclient.put_object(bucket, f"{prefix}/{img_name}", img_bytes, length=img_bytes.getbuffer().nbytes)
+    return {"data": {data_key: f"{base_url}/{bucket}/{prefix}/{img_name}"}}

@@ -1,13 +1,10 @@
-from typing import Literal, List, Mapping, Sequence, Union
+from typing import List, Mapping, Sequence, Union
 
 import torch
 
+from mmm.neural.modules.smp_modules import SegFormer, SMPUnetDecoder
+
 from .SharedBlock import SharedBlock
-from mmm.neural.modules.smp_modules import (
-    SMPUnetDecoder,
-    SMPPyramidAttentionDecoder,
-)
-from mmm.neural.modules.smp_modules import SMPPyramidAttentionDecoderConfig
 
 
 class PyramidDecoder(SharedBlock):
@@ -17,17 +14,18 @@ class PyramidDecoder(SharedBlock):
 
     class Config(SharedBlock.Config):
         module_name: str = "decoder"
-        model: Union[SMPUnetDecoder.Config, SMPPyramidAttentionDecoderConfig] = SMPUnetDecoder.Config()
+        model: Union[SMPUnetDecoder.Config, SegFormer.Config] = SMPUnetDecoder.Config()
 
-    def __init__(self, args: Config, enc_out_channels: List[int], encoder_output_stride: int) -> None:
+    def __init__(self, args: Config, enc_out_channels: List[int], encoder_output_strides: list[int]) -> None:
         super().__init__(args)
-        self.enc_out_channels, self.encoder_output_stride = (
+        self.enc_out_channels, self.encoder_output_stride, self.encoder_output_strides = (
             enc_out_channels,
-            encoder_output_stride,
+            encoder_output_strides[-1],
+            encoder_output_strides,
         )
         self.args: PyramidDecoder.Config
-        self.model: Union[SMPUnetDecoder, SMPPyramidAttentionDecoder] = self.args.model.build_instance(
-            enc_out_channels, encoder_output_stride
+        self.model: Union[SMPUnetDecoder, SegFormer] = self.args.model.build_instance(
+            enc_out_channels, encoder_output_strides
         )
         self.make_mtl_compatible()
 
@@ -40,6 +38,15 @@ class PyramidDecoder(SharedBlock):
         """
         return self.model.get_upsampling_factor()
 
+    def get_strides_fpn(self) -> List[int]:
+        return self.model.get_strides_fpn()
+
+    def forward_fpn(self, feature_pyramid: List[torch.Tensor]) -> List[torch.Tensor]:
+        """
+        Forward pass that returns feature maps with identical channel numbers.
+        """
+        return self.model.forward_fpn(feature_pyramid)
+
     def forward(self, feature_pyramid: List[torch.Tensor]) -> torch.Tensor:
         return self.model(feature_pyramid)
 
@@ -49,7 +56,6 @@ class PyramidDecoder(SharedBlock):
             torch.rand(1, c, 224 // (2 ** (i + 2)), 224 // (2 ** (i + 2))).to(self.torch_device)
             for i, c in enumerate(self.enc_out_channels[1:])
         ]
-        # assert example_input[-1].shape[3] == 224 // self.encoder_output_stride
         return example_input
 
     def get_input_names(self) -> Sequence[str]:

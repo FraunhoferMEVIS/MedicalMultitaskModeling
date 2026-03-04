@@ -1,6 +1,8 @@
 from typing import List
+
 import pytest
-from mmm.bucketizing import BucketConfig, Bucket, AmbiguousMatchException
+
+from mmm.bucketizing import AmbiguousMatchException, Bucket, BucketConfig
 
 
 @pytest.fixture

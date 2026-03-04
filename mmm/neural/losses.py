@@ -1,20 +1,15 @@
 import logging
-from typing import Any, Literal, Tuple
-from typing_extensions import Unpack
-from pydantic import Field
-from pydantic.config import ConfigDict
-import numpy as np
+from typing import Literal, Tuple
+
+import segmentation_models_pytorch.losses as smp_losses
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.transforms import transforms
-from torchvision.models import vgg16, VGG16_Weights, resnet18
+from pydantic import Field
+
+from mmm.BaseModel import BaseModel
 
 from .TorchModule import TorchModule
-import segmentation_models_pytorch.losses as smp_losses
-
-from mmm.torch_ext import replace_childen_recursive
-from mmm.BaseModel import BaseModel
 
 
 class CrossEntropyLossConfig(TorchModule):
@@ -52,6 +47,31 @@ class MSELossConfig(TorchModule):
 
     def build_instance(self, *args, **kwargs) -> nn.Module:
         return MSELoss(self)
+
+
+class SmoothL1Loss(nn.Module):
+    """
+    The maximum of the value range is used to scale the loss. It is ok to set the maximum lower than the actual maximum.
+    """
+
+    class Config(TorchModule):
+        loss_type: Literal["smooth_l1"] = "smooth_l1"
+        value_range: Tuple[float, float] = Field(
+            default=(0.0, 1.0),
+        )
+
+        def build_instance(self, *args, **kwargs) -> nn.Module:
+            return SmoothL1Loss(self)
+
+    def __init__(self, args: MSELossConfig) -> None:
+        super().__init__()
+        self.smooth_l1_loss = nn.SmoothL1Loss()
+
+        range_min, range_max = args.value_range
+        self.factor = 1.0 / (range_max - range_min)
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor):
+        return self.factor * self.smooth_l1_loss(inputs, targets)
 
 
 class RMSELossConfig(TorchModule):
@@ -143,7 +163,7 @@ class SMPFocalLoss:
         l = self.crit(preds, targets)
         if l.isnan():
             logging.warning(f"Focal loss is nan for {preds.shape=} and {targets.shape=}")
-            return 0
+            return torch.tensor(0.0, device=preds.device, dtype=preds.dtype)
         else:
             return l
 
@@ -320,3 +340,10 @@ class NnetSurvivalLoss(nn.Module):
         loss = -torch.log(clipped)
 
         return loss.sum()
+
+
+class KLDivLossConfig(TorchModule):
+    loss_type: Literal["Kullback-Leibler"] = "Kullback-Leibler"
+
+    def build_instance(self, *args, **kwargs) -> nn.Module:
+        return nn.KLDivLoss()

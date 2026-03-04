@@ -1,7 +1,7 @@
+import io
 from abc import abstractmethod
 from pathlib import Path
-from typing import List, Literal, Mapping, Sequence, Tuple
-import io
+from typing import Any, List, Literal, Mapping, Sequence, Tuple
 
 try:
     import onnx
@@ -11,16 +11,10 @@ import torch
 import torch.nn as nn
 
 from mmm.mtl_modules.MTLModule import MTLModule
+from mmm.neural.module_conversions import build_instancenorm_like, convert_2d_to_3d
 from mmm.torch_ext import replace_childen_recursive
-from mmm.neural.module_conversions import (
-    convert_2d_to_3d,
-    build_instancenorm_like,
-)
 
-from mmm.mtl_modules.MTLModule import MTLModule
 from .TaskSpecificLayer import TaskSpecificLayer
-
-ModelInput = torch.Tensor | List[torch.Tensor]
 
 
 class SharedBlock(MTLModule):
@@ -118,11 +112,11 @@ class SharedBlock(MTLModule):
         for l in self.task_specific_modules:
             l.set_active_task(task_id)
 
-    def get_example_input(self) -> ModelInput | Tuple[ModelInput, ...]:
+    def get_example_input(self) -> tuple[Any, ...]:
         """
         Used for example in tracing for ONNX export.
         """
-        return torch.rand(1, 3, 224, 224).to(self.torch_device)
+        raise NotImplementedError()
 
     def get_input_names(self) -> Sequence[str]:
         return ["input"]
@@ -133,47 +127,53 @@ class SharedBlock(MTLModule):
     def get_dynamic_axes(self) -> Mapping[str, Mapping[int, str]]:
         return {}
 
+    def export(self, path: Path, for_task: str = "") -> None:
+        """
+        Export the model to a pt2 file that can be loaded using `torch.export.load(...)`
+        """
+        self.set_active_task(for_task)
+        ep = torch.export.export(self.eval(), self.get_example_input())
+        torch.export.save(ep, f=path)
+
     def export_to_onnx(self, path: Path, for_task: str = "") -> None:
+        raise NotImplementedError("Try the new export(...) function, onnx needs attention in the current torch version")
         if onnx is None:
             raise ImportError("ONNX not installed, cannot export model")
 
         self.set_active_task(for_task)
 
-        example_input = self.get_example_input()
-        example_output_shapes = [
-            output_tensor.shape
-            for example_output in (self(*example_input) if isinstance(example_input, tuple) else self(example_input))
-            for output_tensor in (example_output if isinstance(example_output, list) else (example_output,))
-        ]
-        output_names = self.get_output_names()
-        dynamic_axes = self.get_dynamic_axes()
+        # with io.BytesIO() as buffer:
+        torch.onnx.export(
+            self.eval(),  # model being run
+            self.get_example_input(),  # model input (or a tuple for multiple inputs)
+            path.absolute().__str__(),  # where to save the model (can be a file or file-like object)
+            export_params=True,  # store the trained parameter weights inside the model file
+            # opset_version=13,  # the ONNX version to export the model to
+            # do_constant_folding=True,  # whether to execute constant folding for optimization
+            input_names=self.get_input_names(),  # the model's input names
+            output_names=self.get_output_names(),  # the model's output names
+            # training=torch.onnx.TrainingMode.EVAL,
+            dynamic_axes=self.get_dynamic_axes(),
+            dynamo=True,
+        )
+        # buffer.seek(0)
+        # onnx_model = onnx.load(buffer)
 
-        with io.BytesIO() as buffer:
-            torch.onnx.export(
-                self.eval(),  # model being run
-                example_input,  # model input (or a tuple for multiple inputs)
-                buffer,  # where to save the model (can be a file or file-like object)
-                export_params=True,  # store the trained parameter weights inside the model file
-                opset_version=13,  # the ONNX version to export the model to
-                do_constant_folding=True,  # whether to execute constant folding for optimization
-                input_names=self.get_input_names(),  # the model's input names
-                output_names=output_names,  # the model's output names
-                training=torch.onnx.TrainingMode.EVAL,
-                dynamic_axes=self.get_dynamic_axes(),
-            )
-            buffer.seek(0)
-            onnx_model = onnx.load(buffer)
-
+        # example_output_shapes = [
+        #     output_tensor.shape
+        #     for example_output in (self(*example_input) if isinstance(example_input, tuple) else self(example_input))
+        #     for output_tensor in (example_output if isinstance(example_output, list) else (example_output,))
+        # ]
         # Set the correct model output shapes since shape inference fails for some of our models
-        for i, (name, shape) in enumerate(zip(output_names, example_output_shapes)):
-            for d, s in enumerate(shape):
-                if (name not in dynamic_axes or d not in dynamic_axes[name]) and onnx_model.graph.output[
-                    i
-                ].type.tensor_type.shape.dim[d].dim_param:
-                    onnx_model.graph.output[i].type.tensor_type.shape.dim[d].dim_param = ""
-                    onnx_model.graph.output[i].type.tensor_type.shape.dim[d].dim_value = s
+        # for i, (name, shape) in enumerate(zip(output_names, example_output_shapes)):
+        #     for d, s in enumerate(shape):
+        #         if (name not in dynamic_axes or d not in dynamic_axes[name]) and onnx_model.graph.output[
+        #             i
+        #         ].type.tensor_type.shape.dim[d].dim_param:
+        #             onnx_model.graph.output[i].type.tensor_type.shape.dim[d].dim_param = ""
+        #             onnx_model.graph.output[i].type.tensor_type.shape.dim[d].dim_value = s
 
-        onnx.save_model(onnx_model, str(path))
+        # onnx.save_model(onnx_model, str(path))
 
     @abstractmethod
     def forward(self, input):  # type: ignore (weird override thing from PyTorch)

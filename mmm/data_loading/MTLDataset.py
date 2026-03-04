@@ -3,31 +3,52 @@ from __future__ import annotations
 import logging
 import os
 import random
-import warnings
 from abc import abstractmethod
+from copy import deepcopy
 from enum import Enum, auto
+from functools import partial
+from multiprocessing.queues import Queue
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Iterator,
-    List,
-    NewType,
-    Optional,
-    Set,
-    Tuple,
-    TypeVar,
-)
+from typing import Any, Callable, Iterator, List, Optional, Tuple, TypeVar
 
+import logfire
 import numpy as np
 import torch
+from m3_sdk.types import CompressType
+from pydantic import Field
+from torch.multiprocessing import Value
+from torch.utils.data import DataLoader, Dataset, IterableDataset, _utils, get_worker_info
+from torch.utils.data._utils.collate import default_collate
+
 from mmm.BaseModel import BaseModel
 from mmm.transforms import KeepOnlyKeysInDict
-from mmm.utils import disk_cacher, recursive_equality, unique_str_hash
-from torch.utils.data import DataLoader, Dataset, IterableDataset
-from torch.utils.data._utils.collate import default_collate
-from tqdm.auto import tqdm
+from mmm.utils import recursive_equality
+
+# Our caching mechanism requires access to the data queue from within the dataset
+_utils.worker._original_worker_loop = _utils.worker._worker_loop
+
+
+def _mtl_worker_loop(dataset_kind, dataset, index_queue, data_queue, *args):
+    if isinstance(dataset, MTLDataset):
+        dataset._data_queue = data_queue
+    elif isinstance(dataset, IterableDSWrapper) and isinstance(dataset.wrapped, MTLDataset):
+        dataset.wrapped._data_queue = data_queue
+    return _utils.worker._original_worker_loop(dataset_kind, dataset, index_queue, data_queue, *args)
+
+
+_utils.worker._worker_loop = _mtl_worker_loop
+
+
+class M3LoaderInfo:
+    CACHE_PREFIX = "pretraintask"
+
+    def __init__(self, task_name: str, batch_size: int | None, split_name: str):
+        self.task_name, self.batch_size, self.split_name = task_name, batch_size, split_name
+
+    def get_cache_key(self, suffix: str | None = None) -> str:
+        return ":".join(
+            [M3LoaderInfo.CACHE_PREFIX, self.task_name, self.split_name] + ([suffix] if suffix is not None else [])
+        )
 
 
 class InvalidCaseError(Exception):
@@ -41,25 +62,30 @@ class InvalidCaseError(Exception):
         super().__init__(s)
 
 
-SrcCaseType = dict[str, Any]
+SrcCaseType = dict[str, Any] | List[dict[str, Any]]
 
 
-def mtl_collate(batch: List[SrcCaseType]) -> SrcCaseType:
-    """Ignores the meta key when collating"""
-    meta_dicts = [item["meta"] if "meta" in item else {} for item in batch]
-    for case_dict in batch:
-        if "meta" in case_dict:
-            case_dict.pop("meta")
+def mtl_collate(batch: List[SrcCaseType], ignore_keys=["meta"]) -> SrcCaseType:
+    """Ignores the some keys when collating, usually the meta key."""
+    ignored = {
+        ignore_key: [item.pop(ignore_key) if ignore_key in item else {} for item in batch] for ignore_key in ignore_keys
+    }
     res = default_collate(batch)
-    res["meta"] = meta_dicts  # type: ignore
+    for ignore_key in ignore_keys:
+        res[ignore_key] = ignored[ignore_key]
     return res  # type: ignore
+
+
+T = TypeVar("T")
+
+
+def flatten_list(l: list[list[T]]) -> list[T]:
+    return [item for sublist in l for item in sublist]
 
 
 def mtl_batch_collate(batch: List[List[SrcCaseType]]) -> SrcCaseType:
     """Ignores the meta key when collating datasets that already return batches"""
-    # Flatten list
-    batch_single_list = [item for sublist in batch for item in sublist]
-    return mtl_collate(batch_single_list)
+    return mtl_collate(flatten_list(batch))
 
 
 class DatasetStyle(Enum):
@@ -68,36 +94,75 @@ class DatasetStyle(Enum):
 
 
 class IterableDSWrapper(IterableDataset):
+    """
+    Dataloader make an isinstance check.
+    IterableDSWrapper is used to pass this check for MTLDatasets that should be iterable-style.
+    """
+
     def __init__(self, fn) -> None:
-        self.fn = fn
+        self.wrapped = fn
 
     def __iter__(self):
-        return self.fn.__iter__()
+        return self.wrapped.__iter__()
+
+    def __getattr__(self, name):
+        return getattr(self.wrapped, name)
+
+
+class MakeIterable(IterableDataset[SrcCaseType]):
+    """
+    If caching is enabled, this will make map-style datasets iterable-style datasets
+    """
+
+    def __init__(self, ds: Dataset) -> None:
+        self.ds = ds
+
+    def __iter__(self):
+        indices = list(range(len(self.ds)))  # type: ignore
+        random.shuffle(indices)
+        for index in indices:
+            yield self.ds[index]
+
+
+class CacheSettings(BaseModel):
+    cache_size: int = Field(default=..., gt=0, description="Number of items kept in shared memory.")
+    prepare_new_threshold: int = Field(
+        default=3,
+        description="If more items are already in the queue, new items will be prepared.",
+    )
+    prefetch_items: int = Field(
+        default=5,
+        description="Number of items in the prefetch queue of items that are next added to the cache.",
+    )
+    max_hits: None | int = Field(default=None, description="Minimum and maximum number of cache hits.")
 
 
 class MTLDataset(Dataset[SrcCaseType]):
-    """Wrapper for the PyTorch implementation of Datasets.
-    Map-style datasets have a length and are integer-indexable.
+    """
+    MTLDataset is a wrapper around a torch dataset which can verify cases depending on the dataset type.
+
+    - Map-style datasets have a length and are integer-indexable.
+    - src_ds -> should contain the full data for a case
+    - src_transform -> converts the data into the training format and the result should be small
+    - If you want to apply random transformations, use the batch_transform.
+    - Avoid random transforms as part of the `src_ds` or the optional src_transform (caching would be circumvented)
 
     It enforces cases to be based on dictionaries where certain keys have a fixed place and meaning.
-    Like "image" is usually the image data scaled to [0, 1].
-    Custom types might make the code more modular but would break compatibility
-    with MONAI transforms and PyTorch dataloaders.
+    Like "image" is usually image data scaled to [0, 1].
 
-    MTLDataset can be a wrapper around a vanilla torch dataset which can verify cases depending on the dataset type.
-    Additionally, we recommend not using random transforms as part of the `src_ds` or the optional src_transform.
+    - Caching works by storing cache_size cases in RAM
+      - make_cachable -> sets the cache size and makes sure the dataset is iterable-style
 
-    Building steps for a case:
+    Implementation:
 
-    1. Source dataset -> should contain the full data for a case
-    2. src_transform -> converts the data into the right formats and the result should be small if cache_folder is set
+    - mainproc_queuesize communicates the number of prepared items to workers
+    - mainproc_queuesize is set from outside by the Loop, which needs to have a reference to the dataloader
 
-    If cache_folder is set, the result after src_transform and stripping non-relevant keys is saved to `cache_folder`.
-    Make sure `cache_folder` is unique to this dataset, including its config!
-    If you are using our cohort abstraction it will try to make your cache unique w.r.t. its config.
-
-    If you want to apply random transformations, use the cohort's batch-transforms
     """
+
+    def set_cohort_settings(self, batch_size: int, task_name: str, split_name: str):
+        self.loader_info = M3LoaderInfo(batch_size=batch_size, task_name=task_name, split_name=split_name)
+        self.src_ds.mmm_info = self.loader_info  # type: ignore
 
     @staticmethod
     def assert_image_data_assumptions(image_data: torch.Tensor) -> None:
@@ -108,34 +173,28 @@ class MTLDataset(Dataset[SrcCaseType]):
     def __init__(
         self,
         src_ds: Dataset[SrcCaseType],
-        mandatory_case_keys: List[str],
-        optional_case_keys: List[str],
         src_transform: Optional[Callable[[SrcCaseType], SrcCaseType]] = None,
         batch_transform: Optional[Callable[[SrcCaseType], Any]] = None,
         collate_fn: Optional[Callable[[List[Any]], SrcCaseType]] = None,
         verify_cases: int = 0,
+        cache_cfg: CacheSettings | None = None,
         **dataloader_kwargs,
     ) -> None:
-        """Generates and prepares the dataset.
-
-        Args:
-            data_root (Path): Should be the path to a folder where the data for this dataset can be stored
-            data_cache (Path): Path to cache directory. If it doesn't exist, the dataset will create it.
-            mandatory_case_keys (List[str]): To be a valid case, these keys need to be in every case
-            optional_case_keys: (List[str]): These keys will not be deleted from the case
-            needs_preparation: (bool): If true, will try to call `self.prepare()`
-        """
         self.src_ds = src_ds
-        self.cache_folder: Optional[Path] = None
+        self.loader_info: M3LoaderInfo | None = None
+
+        # Caching
+        self.cache_cfg: CacheSettings | None = cache_cfg
+        self.cache = []
+        self._data_queue: Queue
+
         self.src_transform = src_transform
         self.batch_transform: Optional[Callable] = batch_transform
         self.collate_fn = collate_fn if collate_fn is not None else mtl_collate
         self.dataloader_kwargs = dataloader_kwargs
 
-        self.mandatory_case_keys: List[str] = mandatory_case_keys
-        self.optional_case_keys: List[str] = optional_case_keys
         self.data_stripper = KeepOnlyKeysInDict(
-            keys=set(self.mandatory_case_keys + self.optional_case_keys),
+            keys=set(self.get_mandatory_keys() + self.get_optional_keys()),
         )
 
         self.reduced_size: float = 1.0
@@ -147,44 +206,52 @@ class MTLDataset(Dataset[SrcCaseType]):
             for case_id in random.sample(list(self._indices), k=min(len(self._indices), verify_cases)):
                 self.verify_case_by_index(case_id)
 
+    @staticmethod
+    def get_mandatory_keys() -> list[str]:
+        """
+        Every case is expected to have these keys. Validation will fail if they are missing.
+        """
+        return []
+
+    @staticmethod
+    def get_optional_keys() -> list[str]:
+        return ["meta", "tabulars"]
+
+    @staticmethod
+    def case_is_compressed(case: dict[str, Any]):
+        if "meta" in case and "compress_type" in case["meta"]:
+            return case["meta"]["compress_type"] != CompressType.rgbimage.value
+        else:
+            return len(case["image"].shape) < 3
+
+    @staticmethod
+    def batch_is_compressed(batched_image: torch.Tensor, meta: None | list[dict[str, Any]] = None) -> bool:
+        """
+        Returns True if the image is compressed, False otherwise.
+        """
+        # If the image is compressed, it should be a 1D tensor [B, C], otherwise [B, C, H, W]
+        return len(batched_image.shape) < 4
+
     def get_dataset_style(self) -> DatasetStyle:
+        # Caching makes the dataset iter-style because it loses its fixed length
         if isinstance(self.src_ds, IterableDataset):
             return DatasetStyle.IterStyle
         else:
             return DatasetStyle.MapStyle
 
-    def enable_caching(self, cache_folder: Path, test_cache_validity: bool = True):
-        """
-        Makes sure that the cache folder exists.
+    def worker_init_fn(self, worker_id):
+        assert self.loader_info is not None, "Cohort settings must be set before initializing workers."
+        logfire.DEFAULT_LOGFIRE_INSTANCE._tags += (f"ds_{self.loader_info.task_name}_{worker_id}",)
+        logfire.info(
+            "Initialized worker {worker_name} with ID {worker_id}, PID: {pid}",
+            worker_name=self.loader_info.task_name,
+            worker_id=worker_id,
+            pid=os.getpid(),
+        )
 
-        If it already exists, optionally check for validity.
-        """
-        self.cache_folder = cache_folder
-        if self.cache_folder.exists():
-            if test_cache_validity:
-                for case_path in self.cache_folder.glob("*.pkl"):
-                    case_id: int = int(case_path.stem)
-                    logging.info(f"Checking cache of case {case_id} for correctness")
-                    shouldbe = self.get_untransformed_case(case_id)
-                    cached_case = self.get_case_from_cache(case_id)
-                    for key in self.mandatory_case_keys + self.optional_case_keys:
-                        if key in shouldbe and key != "meta":
-                            if not recursive_equality(shouldbe[key], cached_case[key]):
-                                logging.warn(f"{key} shows difference between original and cached:")
-                                logging.warn(f"{shouldbe[key]} and {cached_case[key]}")
-                                assert False
-                    break
-        else:
-            self.cache_folder.mkdir(parents=True)
-            logging.info(f"Starting a new cache at {self.cache_folder}")
-        return self
-
-    def get_dataloader(self, **kwargs):
-        if self.get_dataset_style() is DatasetStyle.MapStyle:
-            if "sampler" in self.dataloader_kwargs and "shuffle" in kwargs:
-                kwargs.pop("shuffle")
-            return DataLoader(
-                self,
+    def get_dataloader(self, **kwargs) -> DataLoader:
+        with logfire.span("Building dataloader for {cohort_settings}", cohort_settings=self.loader_info):
+            dl_kwargs = dict(
                 collate_fn=self.collate_fn,
                 # a whole day in seconds
                 # without multiprocessing, a timeout>0 is not allowed
@@ -192,22 +259,48 @@ class MTLDataset(Dataset[SrcCaseType]):
                 **kwargs,
                 **self.dataloader_kwargs,
             )
-        else:
-            # Shuffle is not a valid option for iterablestyle datasets
-            # assert isinstance(self, IterableDataset)
-            if "shuffle" in kwargs:
-                kwargs.pop("shuffle")
-            return DataLoader(
-                IterableDSWrapper(self),
-                collate_fn=self.collate_fn,
-                timeout=(86400 if "num_workers" in kwargs and kwargs["num_workers"] > 0 else 0),
-                **kwargs,
-                **self.dataloader_kwargs,
-            )
+            if self.get_dataset_style() is DatasetStyle.MapStyle and self.cache_cfg is None:
+                if "sampler" in self.dataloader_kwargs and "shuffle" in kwargs:
+                    dl_kwargs.pop("shuffle")
+                dl_ds = self
+            else:
+                if "shuffle" in dl_kwargs:
+                    dl_kwargs.pop("shuffle")  # Shuffle is not a valid option for iterablestyle datasets
+                dl_ds = IterableDSWrapper(self)  # The dataloader checks for isinstance(dataset, IterableDataset)
+            if self.cache_cfg is not None:
+                assert "prefetch_factor" not in kwargs and "prefetch_factor" not in self.dataloader_kwargs
+                dl_kwargs["prefetch_factor"] = self.cache_cfg.prefetch_items
+
+            logfire.info("Dataloader settings: {dl_kwargs}", dl_kwargs=dl_kwargs)
+
+            # Increase the default prefetch factor for multiprocessing
+            try:
+                src_ds_dataloader_defaults = dl_ds.src_ds.get_dataloader_defaults()  # type: ignore
+                logfire.info(
+                    "{dataset_type} has dataloader defaults: {x}, applying them",
+                    dataset_type=type(dl_ds.src_ds),
+                    x=src_ds_dataloader_defaults,
+                )
+                for k, v in src_ds_dataloader_defaults.items():
+                    assert (
+                        k not in dl_kwargs
+                    ), f"Dataset tries to set {k} to {v}, but the value is already {dl_kwargs[k]=}"
+                    dl_kwargs[k] = v
+            except AttributeError:
+                logfire.debug("{dataset_type} has no dataloader defaults", dataset_type=type(dl_ds.src_ds))
+
+        return DataLoader(
+            dl_ds,
+            worker_init_fn=partial(
+                self.worker_init_fn,
+            ),
+            **dl_kwargs,  # type: ignore
+        )
 
     def get_mp_batchiterator(self, get_untransformed_cases=False, batch_size=1, shuffle=True, **kwargs):
         """
         Iterates through this dataset's batches with all available workers.
+        Use cases are for caching and verifying cases.
         """
 
         class UntransformedDS(Dataset):
@@ -218,11 +311,7 @@ class MTLDataset(Dataset[SrcCaseType]):
                 return self.src.__len__()
 
             def __getitem__(self, index) -> Any:
-                return (
-                    self.src.get_untransformed_case(index)
-                    if self.src.cache_folder is None
-                    else self.src.get_case_from_cache(index)
-                )
+                return self.src.get_untransformed_case(index)
 
         workernum_available = len(os.sched_getaffinity(0))
         # Use all workers for big datasets, use only few workers for small datasets
@@ -243,37 +332,11 @@ class MTLDataset(Dataset[SrcCaseType]):
         )
         return prepare_dataloader
 
-    def prefill_cache(self):
-        missing = self.get_free_cache_case_slots()
-        if missing > 0:
-            logging.info(f"Preparing cache of {self.cache_folder}")
-            prepare_dataloader = self.get_mp_batchiterator(persistent_workers=False)
-            pbar = tqdm(prepare_dataloader)
-            for _ in pbar:
-                missing = self.get_free_cache_case_slots()
-                pbar.set_description(f"{missing} cases still missing for caching")
-                if missing <= 0:
-                    break
-
-            if prepare_dataloader._iterator is not None:
-                # Force kill all workers of the dataloader, just to be sure
-                prepare_dataloader._iterator._shutdown_workers()  # type: ignore
-                prepare_dataloader._iterator = None
-
-    def get_free_cache_case_slots(self) -> int:
-        if self.cache_folder is not None:
-            assert self.cache_folder.exists()
-            cached_num = len(list(self.cache_folder.glob("*.pkl")))
-            # For now the number of free cache slots is exactly
-            return len(self) - cached_num
-        else:
-            return 0
-
     def reset_indices(self) -> None:
         if self.reduced_size < 1.0:
             logging.warning(f"Resetting indices of {self} to full size")
         self.reduced_size = 1.0
-        if self.get_dataset_style() is DatasetStyle.MapStyle:
+        if not isinstance(self.src_ds, IterableDataset):
             self._indices = np.array(list(range(len(self.src_ds))))  # type: ignore
         else:
             from mmm.torch_ext import CachingSubCaseDS
@@ -302,9 +365,7 @@ class MTLDataset(Dataset[SrcCaseType]):
             if hasattr(self.src_ds, "supercase_ds"):
                 self.src_ds: CachingSubCaseDS
                 self.fullcachingsubcasedssrc = self.src_ds.supercase_ds
-                new_indices, _ = train_val_split(
-                    list(range(len(self.src_ds.supercase_ds))), perc=fraction, seed=seed  # type: ignore
-                )
+                new_indices, _ = train_val_split(list(range(len(self.src_ds.supercase_ds))), perc=fraction, seed=seed)  # type: ignore
                 self.src_ds.supercase_ds = TransformedSubset(self.src_ds.supercase_ds, indices=new_indices)
             else:
                 raise NotImplementedError
@@ -316,50 +377,114 @@ class MTLDataset(Dataset[SrcCaseType]):
             self.verify_case_by_index(case_index)
 
     def verify_case_by_index(self, index: int) -> SrcCaseType:
-        d = self.get_untransformed_case(index) if self.cache_folder is None else self.get_case_from_cache(index)
-        self.verify_case(d)
+        d = self.get_untransformed_case(index)
+        self.verify_case(d) if isinstance(d, dict) else [self.verify_case(x) for x in d]
         return d
 
     def verify_case(self, d: SrcCaseType) -> None:
-        missing_keys = [k for k in self.mandatory_case_keys if k not in d]
+        missing_keys = [k for k in self.get_mandatory_keys() if k not in d]
         if missing_keys:
             raise InvalidCaseError(self, -1, [f"{k} missing in case {d}" for k in missing_keys])
 
     def __len__(self) -> int:
         return len(self._indices)
 
+    @staticmethod
+    def apply_to_list_or_dict(f, inps):
+        if isinstance(inps, dict):
+            return f(inps)
+        else:
+            return [f(inp) for inp in inps]
+
     def __iter__(self, apply_batchtransform: bool = True) -> Iterator[SrcCaseType]:
+        if self.cache_cfg is not None:
+            return self.iter_caching(apply_batchtransform=apply_batchtransform)
+        else:
+            return self.iter_no_caching(apply_batchtransform=apply_batchtransform)
+
+    def iter_no_caching(self, apply_batchtransform: bool = True) -> Iterator[SrcCaseType]:
         for d in iter(self.src_ds):
             if self.src_transform:
                 d = self.src_transform(d)
 
-            d = self.data_stripper(d)  # type: ignore
+            d = self.apply_to_list_or_dict(self.data_stripper, d)
 
             if self.batch_transform is not None and apply_batchtransform:
                 d = self.batch_transform(d)
 
             yield d
 
+    def iter_caching(self, apply_batchtransform: bool = True) -> Iterator[SrcCaseType]:
+        assert self.cache_cfg is not None, "Iteration is only supported for datasets with caching enabled"
+
+        def return_item(cache_item: dict):
+            d = cache_item["original"]
+            d = deepcopy(d)
+
+            # Rewrite the group ids to be unique in case of multiple cache hits of the same item in one batch
+            if isinstance(d, dict) and "meta" in d and "group_id" in d["meta"]:
+                d["meta"]["group_id"] = f'{d["meta"]["group_id"]}_{cache_item["cachehits"]}'
+            elif isinstance(d, list):
+                for single_case in d:
+                    assert "meta" in single_case and "group_id" in single_case["meta"]
+                    single_case["meta"]["group_id"] = f'{single_case["meta"]["group_id"]}_{cache_item["cachehits"]}'
+            # Otherwise, probably no Grouper is used
+
+            if self.batch_transform is not None and apply_batchtransform:
+                d = self.batch_transform(d)
+            return d
+
+        for d in MakeIterable(self.src_ds):
+            with logfire.span(
+                "Loading item from source, cache size {cachesize}/{cachesize_max}, mainproc-queuesize {mp_queuesize}",
+                cachesize=len(self.cache),
+                cachesize_max=self.cache_cfg.cache_size,
+                mp_queuesize=self._data_queue.qsize(),
+            ):
+                if self.src_transform is not None:
+                    d = self.src_transform(d)
+
+                d = self.apply_to_list_or_dict(self.data_stripper, d)
+
+                if len(self.cache) >= self.cache_cfg.cache_size:
+                    deleted_item = self.cache.pop(0)
+                    # Log how many times this item was used for training
+                    logfire.debug(
+                        "Deleting item with {cachehits} hits",
+                        cachehits=deleted_item["cachehits"],
+                    )
+
+                self.cache.append(new_cache_item := {"original": d, "cachehits": 0})
+
+                yield return_item(new_cache_item)
+
+                # As long as the main process quickly needs new items, only apply batch transform on cache items
+                while len(self.cache) > 0 and self._data_queue.qsize() <= self.cache_cfg.prepare_new_threshold:
+                    cache_item = random.choice(self.cache)  # Take from cache
+                    cache_item["cachehits"] += 1
+                    logfire.debug(
+                        "Yielding cached item with {cachehits} hits because Qsize={mp_queuesize} <= T={threshold}",
+                        cachehits=cache_item["cachehits"],
+                        mp_queuesize=self._data_queue.qsize(),
+                        threshold=self.cache_cfg.prepare_new_threshold,
+                    )
+                    yield return_item(cache_item)
+                    if self.cache_cfg.max_hits is not None and cache_item["cachehits"] >= self.cache_cfg.max_hits:
+                        self.cache.remove(cache_item)
+                        logfire.warning(
+                            "Item has reached {maxhits} (max) cache hits, cache-size: {cache_size}",
+                            maxhits=self.cache_cfg.max_hits,
+                            cache_size=len(self.cache),
+                        )
+
     def get_untransformed_case(self, index: int) -> Any:
         case = self.src_ds[self._indices[index]]
         if self.src_transform is not None:
             case = self.src_transform(case)
-        return self.data_stripper(case)  # type: ignore
-
-    def get_case_from_cache(self, index: int) -> Any:
-        assert self.cache_folder is not None
-        filepath = self.cache_folder / f"{self._indices[index]}.pkl"
-        if filepath.exists():
-            with open(filepath, "rb") as f:
-                return torch.load(f)
-        else:
-            src_case = self.get_untransformed_case(index)
-            with open(filepath, "wb") as f:
-                torch.save(src_case, f)
-            return src_case
+        return self.apply_to_list_or_dict(self.data_stripper, case)
 
     def __getitem__(self, index: int) -> SrcCaseType:
-        src_case = self.get_untransformed_case(index) if self.cache_folder is None else self.get_case_from_cache(index)
+        src_case = self.get_untransformed_case(index)
 
         # All non deterministic transforms should be in the batch_transform
         if self.batch_transform is not None:
@@ -386,16 +511,28 @@ class MTLDataset(Dataset[SrcCaseType]):
 
         batch_size = self._compute_batchsize_from_batch(batch)
         n_examples = min(8, batch_size)
-        st.title(f"Drawing {n_examples} random examples from a batch with size {batch_size}")
+        meta = batch["meta"] if isinstance(batch, dict) else [m.get("meta", {}) for m in batch]
+        unique_groups = set([m["group_id"] if "group_id" in m else f"nogroup{i}" for i, m in enumerate(meta)])
+        st.title(
+            f"Drawing {n_examples} random examples from a batch with size {batch_size} with {len(unique_groups)} unique groups"
+        )
 
         for i in random.sample(list(range(batch_size)), n_examples):
             self._visualize_batch_case(batch, i)
 
     def __repr__(self) -> str:
         res = f"MTLDataset of style {self.get_dataset_style()}"
-        res += f" with mandatory keys for each case: {self.mandatory_case_keys}"
+        res += f" with mandatory keys for each case: {self.get_mandatory_keys()}"
         if self.get_dataset_style is DatasetStyle.MapStyle:
             res += f" with {self.__len__()} cases"
+
+        # If a SubCaseCachingDataset is used, the supercase_ds has a length which we can use
+        elif hasattr(self.src_ds, "supercase_ds"):
+            try:
+                res += f" with {len(self.src_ds.supercase_ds)} supercases"
+            except Exception as e:
+                logging.debug(f"Could not get length of supercase_ds due to {e}")
+
         return res
 
     def st_find_invalid_cases(self) -> None:
@@ -446,25 +583,31 @@ class MTLDataset(Dataset[SrcCaseType]):
                     key=f"case_index{st_prefix}",
                 )
                 try:
-                    case = self.verify_case_by_index(case_index)
+                    cases = self.verify_case_by_index(case_index)
                 except InvalidCaseError as e:
                     st.error(e)
-                    case = self.get_untransformed_case(case_index)
-                self.st_case_viewer(case, case_index)
+                    cases = self.get_untransformed_case(case_index)
+
+                cases = cases if isinstance(cases, list) else [cases]
+
+                self.st_case_viewer(cases, case_index)
             else:
                 with st.form("iterator demo"):
                     max_items = int(st.number_input("Max iterations", step=1, value=10))
                     display_every = int(st.number_input("Display every N case", step=1, value=2))
-                    submitted = st.form_submit_button("Reload iterator")
+                    submitted = st.form_submit_button("Show cases")
 
                     if submitted:
-                        for i, case in enumerate(self.__iter__(apply_batchtransform=False)):
-                            self.verify_case(case)
-                            # case = next(iter(self))
+                        ls = []
+                        for i, cases in enumerate(self.__iter__(apply_batchtransform=False)):
                             if i % display_every == 0:
-                                self.st_case_viewer(case, i)
-                            if i > max_items:
+                                cases = cases if isinstance(cases, list) else [cases]
+                                for case in cases:
+                                    self.verify_case(case)
+                                ls.extend(cases)
+                            if i >= max_items - 1:
                                 break
+                        self.st_case_viewer(ls, -1)
 
         def batch_explorer():
             with st.form("Dataloader settings"):
@@ -495,11 +638,11 @@ class MTLDataset(Dataset[SrcCaseType]):
         demo_name = st.sidebar.selectbox("Choose", list(pages.keys()))
         pages[demo_name]()
 
-    def st_case_viewer(self, case: SrcCaseType, i: int = -1) -> None:
+    def st_case_viewer(self, ls: list[dict[str, Any]], i: int = -1) -> None:
         """
-        Can be called by GUIs to visualize a specific case
+        Can be called by GUIs to visualize a specific dataset item.
         """
         from mmm.logging.st_ext import stw
 
         stw("Overwrite this method to visualize a case")
-        stw(case)
+        stw(ls, st_prefix=f"case{i}")

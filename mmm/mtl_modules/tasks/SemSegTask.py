@@ -1,33 +1,37 @@
-import logging
-import random
 import json
-from pydantic import Field
-from typing import Dict, Tuple, Any, List, cast, Literal, Union, Optional
+import logging
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
-import wandb
 import numpy as np
+import segmentation_models_pytorch.metrics as smp_metrics
 import torch
 import torch.nn as nn
-
 import torchvision.transforms.functional as F
-from torchvision.transforms import Resize, InterpolationMode
+import wandb
+from PIL import Image
+from pydantic import Field
+from torchvision.transforms import InterpolationMode, Resize
+from torchvision.utils import make_grid
 
-from mmm.logging.type_ext import StepMetricDict
-
+from mmm.data_loading.SemSegDataset import SemSegDataset
+from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.logging.batch_visualization import visualize_batch
+from mmm.logging.type_ext import StepFeedbackDict, StepMetricDict
+from mmm.logging.ZipLog import ZipLog
+from mmm.mmm_types.GroupUsage import GroupingStrategy, GroupUsage, MaskingStrategy
+from mmm.mtl_modules.shared_blocks.FeatureMixer import FeatureMixer
+from mmm.mtl_modules.shared_blocks.Grouper import Grouper
 from mmm.mtl_modules.shared_blocks.PyramidDecoder import PyramidDecoder
-
-from .MTLTask import MTLTask
-from mmm.settings import mtl_settings
-from mmm.utils import flatten_list_of_dicts
+from mmm.mtl_modules.shared_blocks.PyramidEncoder import PyramidEncoder
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
-from mmm.data_loading.TrainValCohort import TrainValCohort
-from mmm.data_loading.SemSegDataset import SemSegDataset
-from mmm.neural.module_conversions import convert_2d_to_3d
-from mmm.mtl_modules.shared_blocks.MTLDecoder import MTLDecoder
+from mmm.mtl_modules.shared_blocks.Squeezer import Squeezer
 from mmm.neural.losses import SMPDiceFocalLoss2D
+from mmm.neural.modules.DenseFeatureMixer import DenseFeatureMixer
+from mmm.settings import mtl_settings
+from mmm.utils import flatten_list_of_dicts
 
-import segmentation_models_pytorch.metrics as smp_metrics
+from .MTLTask import MTLTask
 
 
 @torch.no_grad()
@@ -172,8 +176,9 @@ class SemSegTask(MTLTask):
     ...     class_names=["background"] + ds.get_class_names())
     >>> t = tasks.SemSegTask(
     ...     args=configs.SemSegTaskConfig(module_name="TestSegmentation"),
-    ...     cohort=data.TrainValCohort(configs.TrainValCohortConfig(), ssds, val_ds=None),
-    ...     for_decoder=blocks.PyramidDecoder(PyramidDecoder.Config(), [32, 64, 128], 32),
+    ...     cohort=data.TrainValCohort(configs.TrainValCohortConfig(), ssds, val_ds=ssds),
+    ...     for_decoder=blocks.PyramidDecoder(blocks.PyramidDecoder.Config(), [32, 64, 128], (1, 2, 4, 8)),
+    ...     for_squeezer=None,
     ...     class_names=ssds.class_names
     ... )
     """
@@ -181,8 +186,21 @@ class SemSegTask(MTLTask):
     class Config(MTLTask.Config):
         encoder_key: str = "encoder"
         decoder_key: str = "decoder"
-        squeezer_key: str = "squeezer"
-        decoder_type: Literal["pyramid", "mtldecoder"] = "pyramid"
+        squeezer_key: str = Field(default="squeezer", description="Required if grouper or token contexts are used.")
+        grouper_key: GroupUsage = Field(
+            default=GroupUsage(grouper_key="", masking=MaskingStrategy.fullattention),
+            description="If set, a shared Grouper is used, and a mixer will be added to the head if use_head_mixer is True.",
+        )
+        use_head_mixer: bool = Field(
+            default=False,
+            description="""If grouper_key is set, this controls whether a mixer is added to the task head.
+True might make sense to improve performance when training for downstream tasks.
+False might be better for pretraining to avoid the head to be too expressive.""",
+        )
+        mixer_key: str = Field(
+            default="",
+            description="If set, a shared FeatureMixer is used. The grouper_key must be set as well.",
+        )
         loss: Literal["dicefocal"] = "dicefocal"
         dropout: float = 0.0
         headdropout: float = 0.0
@@ -190,27 +208,32 @@ class SemSegTask(MTLTask):
         mask_key: str = "label"
         crit: SMPDiceFocalLoss2D.Config = SMPDiceFocalLoss2D.Config()
         confidence_threshold: float = 0.5
+        group_viz: int = 25
 
     def __init__(
         self,
         class_names: List[str],
-        for_decoder: Union[MTLDecoder, PyramidDecoder],
+        for_decoder: PyramidDecoder,
+        for_squeezer: Squeezer | None,
         args: Config,
         cohort: TrainValCohort[SemSegDataset],
     ):
         super().__init__(args, cohort)
-        self.args: SemSegTask.Config
+        self.args: SemSegTask.Config  # type: ignore[override]
+        assert self.args.grouper_key.grouping is GroupingStrategy.full
         self.class_names = class_names
         if cohort and self.class_names != cohort.datasets[0].class_names:
             logging.warning(
                 f"Class names {self.class_names} do not match dataset class names {cohort.datasets[0].class_names}"
             )
 
-        self.task_modules = self.build_head(for_decoder)
+        self.task_modules = self.build_head(for_decoder, for_squeezer)
+        if self.args.token_contexts:
+            self.task_modules.update(self._build_context_modules(for_squeezer.get_hidden_dim()))
         self.crit = self.build_loss()
 
-    def build_head(self, for_decoder: Optional[Union[MTLDecoder, PyramidDecoder]] = None):
-        return nn.ModuleDict(
+    def build_head(self, for_decoder: PyramidDecoder, for_squeezer: Squeezer):
+        res = nn.ModuleDict(
             {
                 "segmentation_head": nn.Conv2d(
                     for_decoder.get_output_dim_per_pixel(),
@@ -224,6 +247,12 @@ class SemSegTask(MTLTask):
                 "headdropout": (nn.Dropout2d(p=self.args.headdropout) if self.args.headdropout > 0 else nn.Identity()),
             }
         )
+        if self.args.grouper_key.grouper_key and self.args.use_head_mixer:
+            res["mixer"] = DenseFeatureMixer(
+                latent_dim=for_squeezer.get_hidden_dim(),
+                pixel_feature_dim=for_decoder.get_output_dim_per_pixel(),
+            )
+        return res
 
     def build_loss(self):
         return SMPDiceFocalLoss2D(
@@ -242,25 +271,56 @@ class SemSegTask(MTLTask):
         batch[self.args.mask_key] = batch[self.args.mask_key].to(self.torch_device)
         return batch
 
-    def forward(self, x: Dict[str, Any], shared_blocks: Dict[str, SharedBlock]):
-        feat = shared_blocks[self.args.encoder_key](x)
+    @staticmethod
+    def compute_squeezed_features(enc: PyramidEncoder, squeezer: Squeezer, x: torch.Tensor):
+        feat = enc(x)
+        feat[-1], hidden_vector = squeezer(feat)
+        return feat, hidden_vector.flatten(1, -1)
 
-        if hasattr(self.args, "squeezer_key") and self.args.squeezer_key in list(shared_blocks.keys()):
-            feat[-1], _ = shared_blocks[self.args.squeezer_key](feat)
+    def forward(self, inputs: tuple[dict[str, Any], torch.Tensor], shared_blocks: dict[str, SharedBlock]):
+        # Enable image, supercase_indices for backward compatibility
+        x, supercase_indices, contexts = inputs if len(inputs) == 3 else (inputs[0], inputs[1], None)
+
+        feat, hidden_vector = self.compute_squeezed_features(
+            shared_blocks[self.args.encoder_key],
+            shared_blocks[self.args.squeezer_key],
+            x,
+        )
+
+        if (
+            hasattr(self.args, "token_contexts") and len(self.args.token_contexts) > 0
+        ):  # Only if there is at least one context which should be used
+            for ctx in self.args.token_contexts:
+                ctx_item = [c[ctx.index_in_context] for c in contexts]
+                if isinstance(ctx.embedding, str):
+                    hidden_vector = shared_blocks[ctx.embedding](hidden_vector, ctx_item)
+
+        if self.args.grouper_key.grouper_key:
+            if hasattr(self.args, "positions") and self.args.positions is not None:
+                positions = [c[self.args.positions[0]] for c in contexts]
+            else:
+                positions = None
+            hidden_vector, self._grouper_meta = shared_blocks[self.args.grouper_key.grouper_key](
+                hidden_vector, supercase_indices, self.args.grouper_key, positions=positions
+            )
 
         if self.args.dropout > 0.0:
             feat = [feat[0]] + [self.task_modules["dropout"][i](f) for i, f in enumerate(feat[1:])]  # type: ignore
 
+        if self.args.mixer_key:
+            mixer: FeatureMixer = shared_blocks[self.args.mixer_key]
+            feat = mixer(hidden_vector, feat, supercase_indices)
+
         # The decoder computes from the feature pyramid and the image's hidden dimension an embedding per pixel
-        if self.args.decoder_type == "mtldecoder":
-            decoder: MTLDecoder = shared_blocks[self.args.decoder_key]  # type: ignore
-            raise Exception("MTLDecoder requires conditioning")
-            decoder_output = decoder.forward(feat, z)  # type: ignore
-        elif self.args.decoder_type == "pyramid":
-            decoder: PyramidDecoder = cast(PyramidDecoder, shared_blocks[self.args.decoder_key])
-            decoder_output = decoder.forward(feat)
-        else:
-            raise Exception(f"Unknown decoder type: {self.args.decoder_type}")
+        decoder: PyramidDecoder = shared_blocks[self.args.decoder_key]
+        decoder_output = decoder.forward(feat)
+
+        if (
+            "mixer" in self.task_modules and self.args.grouper_key.grouper_key
+        ):  # Only a grouper, not a shared mixer, is sufficient to apply the task's mixer
+            if hasattr(self.args, "use_head_mixer") and not self.args.use_head_mixer:  # backward compatibility
+                raise Exception("Inconsistent configuration: use_head_mixer is False but mixer is in task modules.")
+            decoder_output = self.task_modules["mixer"](hidden_vector, decoder_output, supercase_indices)
 
         # task specific computation
         if self.args.headdropout > 0.0:
@@ -280,7 +340,9 @@ class SemSegTask(MTLTask):
                 return True
         return False
 
-    def training_step(self, batch: Dict[str, Any], shared_blocks: SharedModules) -> Optional[Tuple[torch.Tensor, Dict]]:
+    def training_step(
+        self, batch: dict[str, Any], shared_blocks: SharedModules
+    ) -> tuple[torch.Tensor, StepFeedbackDict]:
         im = batch["image"]
         mask = batch[self.args.mask_key]
         # Skip the batch, if there is only the ignore index in the mask
@@ -289,7 +351,13 @@ class SemSegTask(MTLTask):
 
         metas = batch["meta"] if "meta" in batch else [{} for _ in range(im.shape[0])]
 
-        y_hat = shared_blocks.forward(im, self.forward)
+        if self.args.grouper_key.grouper_key:
+            supercase_indices = Grouper.extract_ids_from_batch(
+                [x.get("group_id", None) for x in metas], for_task_name=self.get_name()
+            ).to(self.torch_device)
+        else:
+            supercase_indices = None
+        y_hat = shared_blocks.forward((im, supercase_indices, [x.get("context") for x in metas]), self.forward)
 
         if y_hat.shape != mask.shape:
             mask = F.resize(mask, y_hat.shape[-2:], interpolation=InterpolationMode.NEAREST)
@@ -319,9 +387,33 @@ class SemSegTask(MTLTask):
 
         self.add_step_result(batch_loss.item(), step_metrics)
 
-        realtime_log.update(self._visualize_preds(im_detached, mask_detached, y_hat_preds, step_metrics, metas))
+        if self.ask_for_visualization():
+            log = visualize_batch(
+                im_detached.cpu(),
+                metas,
+                self.process_for_visualization(mask_detached, y_hat_probas),
+                smp_metrics.iou_score(
+                    torch.LongTensor(step_metrics["tp"]),
+                    torch.LongTensor(step_metrics["fp"]),
+                    torch.LongTensor(step_metrics["fn"]),
+                    torch.LongTensor(step_metrics["tn"]),
+                ).tolist(),
+            )
+            log.upload()
+            realtime_log["preds"] = log.build_instruction()
 
         return batch_loss, realtime_log
+
+    def process_for_visualization(
+        self, mask: torch.Tensor, y_hat_probas: torch.Tensor
+    ) -> dict[str, tuple[torch.Tensor, list[str]]]:
+        # Unlabeled class exists only for the ground truth
+        assert mtl_settings.ignore_class_value == -1
+        gt = torch.nn.functional.one_hot(mask + 1, len(self.class_names) + 1).permute(0, 3, 1, 2).cpu()
+        return {
+            "multiclass_masks": (gt, ["unlabeled"] + self.class_names),
+            "predictions": (y_hat_probas.cpu(), self.class_names),
+        }
 
     def normalize_loss(self, dice_loss: torch.Tensor, focal_loss: torch.Tensor) -> torch.Tensor:
         # For now, normalization like normal cross entropy seems to be sufficient
@@ -343,66 +435,6 @@ class SemSegTask(MTLTask):
             "tn": tn.numpy(),
         }  # type: ignore
         return step_metrics
-
-    @torch.no_grad()
-    def _visualize_pred(self, img, mask, pred, im_iou, meta: Dict) -> wandb.Image:
-        if pred.shape[-2:] != img.shape[-2:]:
-            # Add channel dim, resize, remove channel dim:
-            mask = F.resize(
-                mask.unsqueeze(0),
-                img.shape[-2:],
-                interpolation=InterpolationMode.NEAREST,
-            ).squeeze()
-            pred = F.resize(
-                pred.unsqueeze(0),
-                img.shape[-2:],
-                interpolation=InterpolationMode.NEAREST,
-            ).squeeze()
-
-        metastr = json.dumps(meta, default=str)
-        classes = {i + 1: self.class_names[i] for i in range(len(self.class_names))}
-        assert mtl_settings.ignore_class_value not in classes, "Unexpected ignore class value in class names!"
-        classes.update({mtl_settings.ignore_class_value + 1: "ignored"})
-        res = wandb.Image(
-            img,
-            masks={
-                "predictions": {
-                    "mask_data": pred.numpy() + 1,
-                    "class_labels": classes,
-                },
-                "ground_truth": {
-                    "mask_data": mask.numpy() + 1,
-                    "class_labels": classes,
-                },
-            },
-            caption=f"{self.class_names}\nIOU: {im_iou.numpy()}\n[{torch.min(img):.2f}, {torch.max(img):.2f}]\n{img.shape}\n{metastr}]",
-        )
-        return res
-
-    @torch.no_grad()
-    def _visualize_preds(self, train_ims, train_masks, preds, step_metrics: Dict, metas: List[Dict]) -> Dict:
-        res = {}
-
-        vis_n = min(self._takeout_vis_budget(), train_ims.size(0))
-        if vis_n >= 1:
-            batch_size = train_ims.size(0)
-            wandb_ims = []
-            for rand_index in random.sample(list(range(batch_size)), vis_n):
-                im, mask, pred = (
-                    train_ims[rand_index].cpu(),
-                    train_masks[rand_index].cpu(),
-                    preds[rand_index].cpu(),
-                )
-                im_iou = smp_metrics.iou_score(
-                    torch.LongTensor(step_metrics["tp"][rand_index]),
-                    torch.LongTensor(step_metrics["fp"][rand_index]),
-                    torch.LongTensor(step_metrics["fn"][rand_index]),
-                    torch.LongTensor(step_metrics["tn"][rand_index]),
-                )
-                wandb_ims.append(self._visualize_pred(im, mask, pred, im_iou, metas[rand_index]))
-
-            res["preds"] = wandb_ims
-        return res
 
     def log_epoch_metrics(self) -> Tuple[Dict[str, Any], str]:
         flat_metrics = flatten_list_of_dicts(self._step_metrics)
@@ -481,6 +513,21 @@ class SemSegTask(MTLTask):
             prediction[max_values < pixel_threshold] = mtl_settings.ignore_class_value
         return prediction
 
+    def needs_shared_blocks(self):
+        res = [
+            self.args.encoder_key,
+            self.args.decoder_key,
+            self.args.squeezer_key,
+        ]
+
+        if self.args.grouper_key.grouper_key:
+            res.append(self.args.grouper_key.grouper_key)
+
+        if self.args.mixer_key:
+            res.append(self.args.mixer_key)
+
+        return res
+
 
 class MultiLabelSemSegTask(SemSegTask):
     """
@@ -550,6 +597,15 @@ class MultiLabelSemSegTask(SemSegTask):
         prediction[out_probas > threshold] = 1
         return prediction
 
+    def process_for_visualization(
+        self, mask: torch.Tensor, y_hat_probas: torch.Tensor
+    ) -> dict[str, tuple[torch.Tensor, list[str]]]:
+        return {
+            "foreground_masks": ((mask.clone().cpu() == 1).long(), [f"FG_{name}" for name in self.class_names]),
+            "background_masks": ((mask.clone().cpu() == 0).long(), [f"BG_{name}" for name in self.class_names]),
+            "predictions": (y_hat_probas.cpu(), self.class_names),
+        }
+
     @torch.no_grad()
     def _visualize_pred(self, img, mask, pred, im_iou, meta: Dict) -> wandb.Image:
         if pred.shape[-2:] != img.shape[-2:]:
@@ -605,6 +661,3 @@ class MultiLabelSemSegTask(SemSegTask):
 
     def normalize_loss(self, dice_loss: torch.Tensor, focal_loss: torch.Tensor) -> torch.Tensor:
         return dice_loss + (focal_loss * 1.44269)  # log2(exp(1))
-
-    # def log_epoch_metrics(self) -> Tuple[Dict[str, Any], str]:
-    #     return {}, f"{self.get_name()} - loss: {self.get_short_status()}"

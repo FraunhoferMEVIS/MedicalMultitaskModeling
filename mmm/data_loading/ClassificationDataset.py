@@ -1,18 +1,17 @@
 from __future__ import annotations
+
+import json
 import logging
-import numpy as np
 import random
-import warnings
-from typing import Any, List, Optional, Callable, Dict, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
-from PIL.Image import Image
-
+import numpy as np
 import torchvision.transforms.functional as F
-
+from PIL.Image import Image
 from torch.utils.data import Dataset
 
 from mmm.bucketizing import BucketConfig
-from mmm.logging.st_ext import blend_with_mask
+
 from .MTLDataset import MTLDataset, SrcCaseType
 
 CaseDict = TypeVar("CaseDict", bound=Dict)
@@ -43,36 +42,26 @@ class ClassificationDataset(MTLDataset):
     def TorchvisionToMTLClf(t: Tuple[Image, int]):
         return {"image": F.to_tensor(t[0]), "class": t[1]}
 
-    @staticmethod
-    def from_torchvision(ds: Dataset, class_names: Optional[List[str]] = None) -> ClassificationDataset:
-        """
-        A torchvision dataset returns tuples of the form (img: PIL.Image, class_index: int)
-        """
-        warnings.warn("Use TorchvisionToMTLClf instead as a src_transform", DeprecationWarning)
-        r = ClassificationDataset(
-            src_ds=ds,
-            src_transform=lambda t: {"image": F.to_tensor(t[0]), "class": t[1]},
-            class_names=class_names,
-        )
-        return r
-
     def __init__(
         self,
         src_ds: Dataset[SrcCaseType],
-        class_names: Optional[List[str]] = None,
+        class_names: Optional[list[str]] = None,
         *args,
         **kwargs,
     ) -> None:
         assert class_names is not None, "Classification datasets without class names are deprecated"
-        self.class_names: List[str] = class_names
+        self.class_names: list[str] = class_names
         self.vis_classes = class_names
-        super().__init__(src_ds, ["image", "class"], ["meta"], *args, **kwargs)
+        super().__init__(src_ds, *args, **kwargs)
 
-    def verify_case_by_index(self, index: int) -> Dict[str, Any]:
-        case = super().verify_case_by_index(index)
-        self.assert_image_data_assumptions(case["image"])
-        assert isinstance(case["class"], int), "Class label should be an integer"
-        return case
+    @staticmethod
+    def get_mandatory_keys() -> list[str]:
+        return super(ClassificationDataset, ClassificationDataset).get_mandatory_keys() + ["image", "class"]
+
+    def verify_case(self, d: SrcCaseType) -> None:
+        self.assert_image_data_assumptions(d["image"])
+        assert isinstance(d["class"], int), "Class label should be an integer"
+        return d
 
     def set_indices_by_fraction(self, fraction: float, seed: int = 13) -> None:
         """
@@ -117,27 +106,39 @@ class ClassificationDataset(MTLDataset):
     def get_input_output_tuple(self, batch: Dict[str, Any]) -> Tuple[Any, ...]:
         return batch["image"], batch["class"]
 
-    def st_case_viewer(self, case: Dict[str, Any], i: int) -> None:
-        import streamlit as st
+    def _label_to_html(self, class_label: int, context: tuple = ()) -> str:
+        html = f'<span style="color:green">{self.class_names[class_label]}</span>'
 
-        if self.class_names:
-            for i, class_name in enumerate(self.class_names):
-                if case["class"] != i:
-                    # For large datasets, do not show negative classes
-                    if len(self.class_names) < 100:
-                        st.write(f"class {i}: {class_name}")
-                else:
-                    st.write(f"THIS CLASS ({i}): {class_name}")
+        if context:
+            html += f"<br>Context: <span style='color:orange'>{context}</span>"
+        return html
 
-        im = case["image"]
-        blend_with_mask(im, None, caption_suffix=f"Shape: {im.shape}", st_key=f"c{i}")
-        st.write(case)
+    def st_case_viewer(self, ls: list[dict[str, Any]], i: int) -> None:
+        from mmm.logging.st_ext import Image2D, M3Image, m3_image, st
+
+        m3_image(
+            data=M3Image.Data(
+                images=[
+                    Image2D.from_tensor(
+                        img=d["image"],
+                        class_names=self.class_names,
+                        desc=json.dumps(d["meta"], indent=2, default=str) if "meta" in d else None,
+                        caption=self._label_to_html(
+                            d["class"],
+                            context=d.get("meta", {}).get("context", ()),
+                        ),
+                    )
+                    for d in ls
+                ],
+            ),
+            key=f"img{i}_original",
+        )
 
     def _compute_batchsize_from_batch(self, batch: Dict[str, Any]) -> int:
         return batch["image"].shape[0]
 
     def _visualize_batch_case(self, batch: Dict[str, Any], i: int) -> None:
-        import streamlit as st
+        from mmm.logging.st_ext import blend_with_mask, st
 
         patch = batch["image"][i]
         class_name = self.class_names[batch["class"][i]]
@@ -148,9 +149,12 @@ class ClassificationDataset(MTLDataset):
         except:
             logging.debug(f"Batch does not contain meta information at {i}")
 
-        blend_with_mask(
-            patch,
-            None,
-            caption_suffix=f"{i}/{self._compute_batchsize_from_batch(batch)}: {patch.shape}",
-            st_key=f"b{i}",
-        )
+        if self.batch_is_compressed(batched_image=batch["image"]):
+            st.write(f"Compressed image: {patch.shape}")
+        else:
+            blend_with_mask(
+                patch,
+                None,
+                caption_suffix=f"{i}/{self._compute_batchsize_from_batch(batch)}: {patch.shape}",
+                st_key=f"b{i}",
+            )

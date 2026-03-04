@@ -1,14 +1,15 @@
+from pathlib import Path
 from typing import Any
+
+import cv2
 import numpy as np
 import torch
-import cv2
+import torchvision.transforms as transforms
+from m3_sdk.geojson import GeoAnno, annotations_from_mask, create_featurecollection
+from rasterio.features import rasterize
 from shapely.affinity import scale, translate
 from shapely.geometry import Polygon, shape
-from rasterio.features import rasterize
-from rasterio import features
-import torchvision.transforms as transforms
-
-from .GeoAnno import GeoAnno
+from tiffslide import TiffSlide
 
 
 def extract_detection_labels(
@@ -33,13 +34,13 @@ def extract_detection_labels(
 
 
 def rasterize_annotations(
-    window_width_level,
     window_height_level,
+    window_width_level,
     annotations: list[GeoAnno],
     anno_labels: list[int],
     unlabeled_value=-1,
 ):
-    arr = np.zeros((window_width_level, window_height_level), dtype=np.int64)
+    arr = np.zeros((window_height_level, window_width_level), dtype=np.int64)
     arr.fill(unlabeled_value)
     for anno, class_key in zip(annotations, anno_labels):
         rasterize([anno.shape], out=arr, fill=unlabeled_value, default_value=(class_key))
@@ -85,50 +86,16 @@ def move_anno_to_window(anno: GeoAnno, l0_window: Polygon, l0_x, l0_y, downsampl
     return anno
 
 
-def create_featurecollection(annos: list[GeoAnno]) -> dict:
-    res = {
-        "type": "FeatureCollection",
-        "features": [anno.to_geojson() for anno in annos],
-    }
-    return res
+def create_geojson_from_tissuemask(slide: TiffSlide, mask_slidepath: Path, coarse=False) -> dict:
+    mask_array = np.array(TiffSlide(mask_slidepath).get_thumbnail((768, 768)))
+    downsample_fac = slide.level_dimensions[0][0] / mask_array.shape[1]
 
+    assert len(np.unique(mask_array)) > 1
+    foreground = annotations_from_mask(
+        (mask_array > 0).astype(np.uint8),
+        for_values={1: "foreground"},
+        downsample_fac=downsample_fac,
+        coarse=coarse,
+    )
 
-def shapes_from_binary_mask(mask: np.ndarray, downsample_fac: float, coarse: bool, min_area: float = 0.0):
-    """
-    Returns a list of shapely shapes from a binary mask by using connected components.
-
-    min_area always refers to the area in level 0 (computed by your downsample_fac).
-    """
-    if coarse:
-        fine_areas = cv2.connectedComponentsWithStats(mask, 4, cv2.CV_32S)[2][:, cv2.CC_STAT_AREA]
-        mask = features.sieve(mask, size=max(1, fine_areas.mean()))
-    dicts = list(features.shapes(mask))
-    shapes = [(shape(x[0]), x[1]) for x in dicts]
-    shapes = [
-        x for x, val in shapes if x.bounds[2] - x.bounds[0] > 1.0 and x.bounds[3] - x.bounds[1] > 1.0 and val > 0.0
-    ]
-    if min_area:
-        shapes = filter(lambda x: (x.area * (downsample_fac**2)) > min_area, shapes)
-    return [scale(x, xfact=downsample_fac, yfact=downsample_fac, origin=(0, 0)) for x in shapes]  # type:ignore
-
-
-def annotations_from_mask(
-    mask: np.ndarray,
-    for_values: dict[int, str],
-    downsample_fac: float,
-    coarse: bool = False,
-    min_area: float = 0.0,
-) -> list[GeoAnno]:
-    """
-    min_area refers to the area in level 0 (computed by your downsample_fac).
-    """
-    res: list[GeoAnno] = []
-    for val, class_name in for_values.items():
-        shapes_for_val = shapes_from_binary_mask(
-            (mask == val).astype(np.uint8), downsample_fac, coarse, min_area=min_area
-        )
-        annos_for_val = [
-            GeoAnno.from_shapely(shape, class_info=(class_name, len(for_values), val)) for shape in shapes_for_val
-        ]
-        res.extend(annos_for_val)
-    return res
+    return create_featurecollection(foreground)

@@ -1,22 +1,30 @@
 from enum import Enum
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from mmm.BaseModel import BaseModel
-from mmm.mtl_modules.shared_blocks.Grouper import AttentionPoolingReducer
+from mmm.mtl_modules.shared_blocks.Grouper import AttentionPoolingReducer, TransformerReducer
 from mmm.neural.TorchModule import TorchModule
 
 
 class AttentionPoolingConfig(TorchModule):
-    num_heads: int = 1
+    num_heads: int = 8
+    type: Literal["abmil", "transformer"] = "abmil"
 
     def build_instance(self, dim) -> nn.Module:
-        return AttentionPoolingReducer(
-            embedding_dim=dim,
-            num_heads=self.num_heads,
-        )
+        if self.type == "abmil":
+            return AttentionPoolingReducer(
+                embedding_dim=dim,
+                num_heads=self.num_heads,
+            )
+        elif self.type == "transformer":
+            return TransformerReducer(
+                embedding_dim=dim,
+                num_heads=self.num_heads,
+            )
 
 
 class CombinedPooling(nn.Module):

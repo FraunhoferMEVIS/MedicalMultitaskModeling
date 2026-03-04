@@ -1,6 +1,8 @@
 from abc import abstractmethod
-from mmm.BaseModel import BaseModel
+
 import torch.nn as nn
+
+from mmm.BaseModel import BaseModel
 
 
 class TorchModule(BaseModel):

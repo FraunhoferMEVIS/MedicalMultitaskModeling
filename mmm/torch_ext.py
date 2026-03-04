@@ -10,35 +10,17 @@ import os
 import random
 from copy import deepcopy
 from pathlib import Path
-from typing import (
-    Callable,
-    Dict,
-    Generic,
-    Iterator,
-    List,
-    Optional,
-    Sized,
-    Tuple,
-    TypeVar,
-    Union,
-    cast,
-)
+from typing import Callable, Dict, Generic, Iterator, List, Optional, Sized, Tuple, TypeVar, Union, cast
 
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import ChainDataset, DataLoader, Dataset, IterableDataset, Subset, get_worker_info
+from tqdm.auto import tqdm
+
 from mmm.BaseModel import BaseModel
 from mmm.data_loading.MTLDataset import MTLDataset
 from mmm.utils import get_default_cachepath
-from torch.utils.data import (
-    ChainDataset,
-    DataLoader,
-    Dataset,
-    IterableDataset,
-    Subset,
-    get_worker_info,
-)
-from tqdm.auto import tqdm
 
 T = TypeVar("T")
 
@@ -73,102 +55,6 @@ def get_random_ds_sample(ds: Dataset[T], subset_size: Union[float, int]) -> Data
     new_indices = random.sample(range(original_dataset_len), subset_size)
 
     return Subset(ds, new_indices)
-
-
-def default_replacer(cache_size: int, cache: list[T], replacement_items: list[T]) -> tuple[list[T], list[T]]:
-    cache.extend(replacement_items)
-    # Only keep the last `cache_size` items
-    cache = cache[-cache_size:]
-    replacement_items = []
-    return cache, replacement_items
-
-
-class RunningCacheDataset(Dataset):
-    """
-    Uses a background worker to prepare items for the cache.
-
-    It is intended to call `replace_cache_items()` every epoch, which will replace the oldest items in the cache
-    with new items from the background loader.
-    Alternatively, auto replacement may be used,
-    which calls replacement after the number of items currently in the cache were yielded.
-
-    For customizing the replacement of cache items with new items, use the replacer argument.
-    For customizing the items that the background loader requests, use a sampler with the dataloader_kwargs.
-    """
-
-    class Config(BaseModel):
-        cache_size: int = 1000
-        background_loader_prefetch: int = 10
-        background_workers: int = 1
-        min_cache_size: int = 1
-
-    def __init__(self, wrapped_dataset: Dataset, args: Config, replacer=None, **dataloader_kwargs):
-        self.args = args
-        self.cache = []
-        self.replacement_items = []
-        self.replacer = replacer if replacer is not None else default_replacer
-        self.wrapped_ds, self.backgroundloader_kwargs = (
-            wrapped_dataset,
-            dataloader_kwargs,
-        )
-        self.background_loader = DataLoader(
-            self.wrapped_ds,
-            batch_size=1,
-            num_workers=self.args.background_workers,
-            prefetch_factor=self.args.background_loader_prefetch,
-            # persistent_workers=True,
-            collate_fn=lambda x: x[0],
-            **self.backgroundloader_kwargs,
-        )
-        self.mp_iter = self.rebuild_backgrounditer()
-
-        for _ in tqdm(range(self.args.min_cache_size)):
-            self.cache.append(self.request_cache_item())
-
-    def rebuild_backgrounditer(self):
-        assert len(self.wrapped_ds) == len(self.background_loader)
-        return iter(self.background_loader)
-
-    def request_cache_item(self):
-        try:
-            return next(self.mp_iter)
-        except StopIteration:
-            # This restarts the background loader in case of iterable-style datasets
-            self.mp_iter = self.rebuild_backgrounditer()
-            return self.request_cache_item()
-
-    def worker_has_data_available(self) -> bool:
-        # self.mp_iter._data_queue is a multiprocessing.queues.Queue
-        return self.mp_iter._data_queue.qsize() > 0
-
-    def get_cache_max_size(self) -> int:
-        try:
-            ds_len = len(self.wrapped_ds)
-        except:
-            return self.args.cache_size
-        return min(ds_len, self.args.cache_size)
-
-    def __len__(self):
-        return len(self.cache)
-
-    def replace_cache_items(self):
-        """Replaces cache items with new items from the background loader."""
-        self.cache, self.replacement_items = self.replacer(
-            self.get_cache_max_size(), self.cache, self.replacement_items
-        )
-
-    def __getitem__(self, idx):
-        while self.worker_has_data_available() and len(self.replacement_items) < self.args.cache_size:
-            self.replacement_items.append(self.request_cache_item())
-
-        # If there is nothing to fetch anymore, we can restart the background loader
-        # This restarts the background loader in case of map-style datasets
-        if self.mp_iter._tasks_outstanding <= 0:
-            assert self.mp_iter._data_queue.qsize() == 0, "There should be no data left in the queue"
-            self.mp_iter = self.rebuild_backgrounditer()
-
-        res = self.cache[idx]
-        return res
 
 
 SuperCaseType = TypeVar("SuperCaseType")
@@ -225,6 +111,14 @@ class DeterministicSampler(CachingSubCaseDSSampler):
 
     def sample_from_cache(self, draining_phase: bool) -> int:
         return 0  # Always use the first case
+
+
+class DeterministicSamplerSignalLast(DeterministicSampler):
+    def hook_new_subcases(self, subcases: list):
+        subcases = list(subcases)
+        assert "sampler_last_subcase" not in subcases[-1]["meta"]
+        subcases[-1]["meta"]["sampler_last_subcase"] = True
+        return super().hook_new_subcases(subcases)
 
 
 class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
@@ -301,7 +195,7 @@ class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
             logging.debug(f"Worker {worker_id} got {len(supercase_indices)} supercases.")
 
             if not supercase_indices:
-                logging.warn(f"Worker {worker_info} had no supercases in {self}")
+                logging.warning(f"Worker {worker_info} had no supercases in {self}")
                 return
         self.cache_sampler.prepare_supercase_indices(
             supercase_indices, worker_info.id if worker_info is not None else None
@@ -312,20 +206,19 @@ class CachingSubCaseDS(IterableDataset, Generic[SubCaseType]):
             for supercase_index in supercase_indices:
                 supercase = self.supercase_ds[supercase_index]
                 self.add_subcases(self.supercase_loader(supercase))
-                if len(self.subcases) > self.cfg.subcase_cache_size:
+                if len(self.subcases) >= self.cfg.subcase_cache_size:
                     filling_phase = False
 
                 if not filling_phase:
                     # Only yield samples if the cache is pretty full to increase diversity
-                    while len(self.subcases) > (self.cfg.subcase_cache_size // num_workers):
+                    while len(self.subcases) >= max(1, (self.cfg.subcase_cache_size // num_workers)):
                         yield self._yield_sample(draining_phase=False)
-            if filling_phase:
+            if filling_phase and len(self.subcases) < self.cfg.subcase_cache_size:
                 logging.warning(f"Dataset {self=} smaller than cache size {self.cfg.subcase_cache_size}")
 
         if self.cfg.drain_each_epoch:
             # No more supercases to load, yield the remaining cases:
             # We might also skip this to keep the cache full to reduce the next epoch's startup time
-            random.shuffle(self.subcases)
             while self.subcases:
                 yield self._yield_sample(draining_phase=True)
 

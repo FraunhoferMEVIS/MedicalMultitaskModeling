@@ -1,19 +1,41 @@
 from __future__ import annotations
-from pydantic import Field
-from typing import Any, List, Dict, Tuple, Optional
-from abc import abstractmethod
 
+from abc import abstractmethod
+from typing import Any, Dict, List, Optional, Tuple
+
+import logfire
 import torch
 import torch.nn as nn
+from pydantic import Field
 
-from mmm.data_loading.TrainValCohort import TrainValCohort
+from mmm.BaseModel import BaseModel
 from mmm.data_loading.MTLDataset import MTLDataset
-
-from ..MTLModule import MTLModule
-from mmm.mtl_modules.MTLModule import MTLModule
+from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.event_selectors import EventSelector, RecurringEventSelector
 from mmm.logging.type_ext import StepFeedbackDict, StepMetricDict
+from mmm.mtl_modules.MTLModule import MTLModule
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
+from mmm.neural.modules.tabular_embedding import CategoricalEmbedder
+from mmm.settings import mtl_settings
+
+from ..MTLModule import MTLModule
+
+
+class TokenContext(BaseModel):
+    index_in_context: int = Field(description="Context is given as tuple such as (ctx1, ctx2). 1 would select ctx2.")
+    embedding: CategoricalEmbedder.Config | str = Field(
+        description="Configuration for the embedding or name of the shared embedder."
+    )
+
+
+# class LinearPosition(BaseModel):
+#     encoding_type: Literal["linear"] = "linear"
+#     index_in_context: int = Field(0, description="Index in the contexts, such as (ctx1, ctx2). 1 would select ctx2.")
+#     symmetric: bool = Field(default=True, description="Whether the distance should be symmetric (True) or not (False).")
+
+
+# class WSIPatchPosition(BaseModel):
+#     encoding_type: Literal["wsi_patch"] = "wsi_patch"
 
 
 class MTLTask(MTLModule):
@@ -38,11 +60,16 @@ class MTLTask(MTLModule):
         )
         max_visualizations_per_full_train_loop: int = 2
         max_visualizations_per_full_val_loop: int = 4
+        token_contexts: list[TokenContext] = []
+        positions: tuple[int, bool] | None = Field(
+            default=None, description="Index in the contexts, and whether the distance should be symmetric (True)."
+        )
 
     def __init__(self, args: Config, cohort: TrainValCohort[MTLDataset]) -> None:
         super().__init__(args)
         self.args: MTLTask.Config = args
         self.cohort: TrainValCohort[MTLDataset] = cohort
+        self.cohort.for_task_name = self.get_name()
         self.task_modules: nn.ModuleDict
 
         self._step_losses: List[float] = []
@@ -50,27 +77,44 @@ class MTLTask(MTLModule):
 
         self._vis_number_buffer: float = 0.0
 
-    def _takeout_vis_budget(self) -> int:
+    def _build_context_modules(self, embedding_dim: int):
+        """
+        Builds the task modules.
+        """
+        res = {}
+        for ctx in self.args.token_contexts:
+            if not isinstance(ctx.embedding, str):  # If str, a shared embedder is expected
+                res[f"{ctx.index_in_context}"] = CategoricalEmbedder(ctx.embedding, embedding_dim=embedding_dim)
+        return res
+
+    def ask_for_visualization(self) -> bool:
         """
         Returns the task's visualization budget at the current step.
 
         Relies on the module's `training: bool` property.
-
-        Tries to induce the total number of steps from the dataloader's length if the dataset is map-style.
         """
         # Adjust the vis_enabled_epochs to enable visualizations for an epoch
         if not self.args.vis_enabled_epochs.is_event(self._epoch):
-            return 0
+            return False
 
-        # current_step = len(self._step_losses)
-        # dataloader_length = len(self.cohort.data_loaders[0 if self.training else 1])  # type: ignore
         if self.training:
             max_vis = self.args.max_visualizations_per_full_train_loop
         else:
             max_vis = self.args.max_visualizations_per_full_val_loop
 
         self._vis_number_buffer += 1
-        return 1 if self._vis_number_buffer < max_vis else 0
+
+        if self._vis_number_buffer < max_vis:
+            if not mtl_settings.default_log_folder:
+                logfire.warning(
+                    "Visualization requested for {task_name} but folder: {folder}.",
+                    task_name=self.get_name(),
+                    folder=mtl_settings.default_log_folder,
+                )
+                return False
+            return True
+        else:
+            return False
 
     def prepare_batch(self, batch: Dict[str, Any]) -> Any:
         """
@@ -108,8 +152,8 @@ class MTLTask(MTLModule):
 
     @abstractmethod
     def training_step(
-        self, batch: Dict[str, Any], shared_blocks: SharedModules
-    ) -> Tuple[torch.Tensor, StepFeedbackDict]:
+        self, batch: dict[str, Any], shared_blocks: SharedModules
+    ) -> tuple[torch.Tensor, StepFeedbackDict]:
         """
         Returns the loss (single number as torch.FloatTensor) and a dictionary with immediate feedback for a human.
 
@@ -157,3 +201,9 @@ class MTLTask(MTLModule):
         <br />
         {self.cohort.__repr_html__()}
         """
+
+    def needs_shared_blocks(self) -> list[str]:
+        """
+        Returns the keys of the shared blocks that this task depends on.
+        """
+        raise NotImplementedError

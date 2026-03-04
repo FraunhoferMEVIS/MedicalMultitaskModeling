@@ -5,27 +5,40 @@ Importing this module will automatically set our recommended settings.
 """
 
 import inspect
-from typing import Optional, List, Callable, Dict, Tuple, Any
-import traceback
+import json
 import os
-from functools import partial
-from tqdm import tqdm
 import random
-import torch
-import numpy as np
+import traceback
+import zipfile
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, cast
+
 import cv2
+import imageio.v3 as iio
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 try:
     import streamlit as st
 except ImportError:
-    st = None
+    if not TYPE_CHECKING:
+        st = None
+    else:
+        raise  # Happens during type checking and avoids false positives
 
-from torch.utils.data import Dataset, DataLoader
-from mmm.data_loading.MTLDataset import MTLDataset, DatasetStyle
+from m3_sdk.DistributedPath import DistributedPath
+from m3_sdk.geojson import get_colors
+from m3_sdk.utils import rgbnumpy_to_base64
+
+from mmm.data_loading.MTLDataset import DatasetStyle
 from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.DataSplit import DataSplit
-from mmm.typing_utils import get_colors
+from mmm.logging.st_m3image import Image2D, ImageOverlay, ImageOverlays, M3Image, m3_image
 from mmm.settings import mtl_settings
+from mmm.utils import remove_folder_blocking_if_exists
 
 if st is not None:
     st.set_page_config(layout="wide")
@@ -74,8 +87,10 @@ def blend_with_mask(
             mask_no_channels = mask_no_channels[..., st.session_state[slider_key]]
 
     if torch.max(im_channels_first) > 1.0 or torch.min(im_channels_first) < 0.0:
-        st.error("Pixel range is expected to be normalized into [0, 1]. Applying auto fix")
-        im_channels_first = im_channels_first / 255.0
+        st.info("For training, pixel range is expected to be normalized into [0, 1]!")
+        im_channels_first = (im_channels_first - torch.min(im_channels_first)) / (
+            torch.max(im_channels_first) - torch.min(im_channels_first)
+        )
     im = im_channels_first.numpy().astype(np.float32)
 
     # Printing images happens channels last, while the library uses channels first
@@ -191,122 +206,6 @@ def blend_with_mask(
     st.image(im, caption=f"{caption}\n{caption_suffix}", clamp=True)
 
 
-def _cohort_explorer(cohort: TrainValCohort) -> None:
-    # Streamlit would otherwise resample cross validation splits
-    import streamlit as st
-
-    cohort.prepare_epoch(epoch=0)
-
-    if split_name_selection := st.sidebar.selectbox("TrainOrVal", ["Training", "Validation"]):
-        split_name: str = split_name_selection
-    else:
-        split_name: str = "Training"
-    train_val_index = 0 if split_name == "Training" else 1
-
-    def dataset_explorer():
-        ds = cohort.datasets[train_val_index]
-        st.title(f"{split_name} dataset:")
-
-        if ds.get_dataset_style() is DatasetStyle.MapStyle:
-            dataset_len = len(ds)  # type: ignore
-            case_index = st.slider("select case", max_value=dataset_len - 1)
-            case = ds.get_untransformed_case(case_index)
-            ds.st_case_viewer(case, case_index)
-
-            if st.button(label="verify all cases"):
-
-                class VerifyingDataset(Dataset):
-                    def __init__(self, src):
-                        self.src = src
-
-                    def __len__(self):
-                        return len(self.src)
-
-                    def __getitem__(self, i: int):
-                        try:
-                            case = self.src[i]
-                            assert self.src.verify_case(case), f"case {case} could not be verified"
-                            return case
-                        except Exception as e:
-                            print(i)
-                            print(e)
-                            st.write(i)
-                            st.write(e)
-                            traceback.print_exc()
-
-                prog_bar = st.progress(0.0)
-                st.write(f"Verifying with {len(os.sched_getaffinity(0))} workers")
-                dl = DataLoader(
-                    VerifyingDataset(ds),
-                    shuffle=True,
-                    num_workers=len(os.sched_getaffinity(0)),
-                    batch_size=128,
-                    collate_fn=lambda ls: ls,
-                )
-                for i, _ in enumerate(tqdm(dl)):
-                    prog_bar.progress(i / (dataset_len // 128))
-                st.balloons()
-        else:
-            with st.form("iterator demo"):
-                max_items = int(st.number_input("Max iterations", step=1, value=10))
-                display_every = int(st.number_input("Display every N case", step=1, value=2))
-                submitted = st.form_submit_button("Reload iterator")
-
-            # @st.cache(allow_output_mutation=True)
-            # def cache_ds_iterator():
-            #     return iter(ds)
-            if submitted:
-                for i, case in enumerate(ds):
-                    ds.verify_case(case)
-                    # case = next(iter(ds))
-                    if i % display_every == 0:
-                        ds.st_case_viewer(case, i)
-                    if i > max_items:
-                        break
-
-    def batch_explorer():
-        ds = cohort.datasets[train_val_index]
-        test_batch = cohort.get_random_batch(DataSplit.from_index(train_val_index))
-        ds.visualize_batch(test_batch)
-
-    pages = {"Dataset explorer": dataset_explorer, "Batch explorer": batch_explorer}
-
-    demo_name = st.sidebar.selectbox("Choose", list(pages.keys()))
-    if demo_name is not None:
-        pages[demo_name]()
-    else:
-        st.write("Select a page")
-
-
-def side_by_side(img_1: torch.Tensor, img_2: torch.Tensor):
-    """
-    Shows two images side by side.
-    Only implemented for 2D images [C,W,H], dtype: float32
-    """
-    import streamlit as st
-
-    if torch.max(img_1) > 1.0 or torch.min(img_1) < 0.0:
-        st.error("Pixel range is expected to be normalized into [0, 1]. Applying auto fix to first image")
-    if torch.max(img_2) > 1.0 or torch.min(img_2) < 0.0:
-        st.error("Pixel range is expected to be normalized into [0, 1]. Applying auto fix to second image")
-
-    img_1: np.ndarray = img_1.numpy().astype(np.float32)
-    img_2: np.ndarray = img_2.numpy().astype(np.float32)
-
-    img_1 = np.moveaxis(img_1, 0, -1)
-    img_2 = np.moveaxis(img_2, 0, -1)
-    divider = np.zeros(img_1.shape)[:, :15, :]
-    # Concatenating two images side by side
-
-    img = np.concatenate((img_1, divider, img_2), axis=1)
-
-    st.image(
-        img,
-        caption=f"two views of the same image. each of shape {img_1.shape}",
-        clamp=True,
-    )
-
-
 def stw(obj: Any, st_prefix: str = "") -> None:
     """
     Takes an object and tries to visualize it.
@@ -335,9 +234,273 @@ def multi_cohort_explorer(cohorts: Dict[str, Callable[[], TrainValCohort]]):
     # random.seed(0)
     import streamlit as st
 
-    cohort_name = st.sidebar.selectbox("Choose cohort", list(cohorts.keys()))
+    cohort_names = list(cohorts.keys())
+    cohort_name = st.sidebar.selectbox("Choose cohort", cohort_names)
 
     if cohort_name:
-        stw(cohorts[cohort_name]())
+        stw(cohorts[cohort_name](), st_prefix=cohort_name)
     else:
         st.write(f"Select a Cohort")
+
+
+def download_zip_to_workdir(zip_url: str, workdir: Path) -> None:
+    remove_folder_blocking_if_exists(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    workdir.joinpath("temp.zip").write_bytes(DistributedPath(uri=zip_url).upath().read_bytes())
+    with zipfile.ZipFile(workdir.joinpath("temp.zip"), "r") as zip_ref:
+        zip_ref.extractall(workdir)
+    workdir.joinpath("temp.zip").unlink()
+
+
+def st_download_sidebar():
+    with st.sidebar:
+        workdir = Path(
+            st.text_input(
+                "Working directory",
+                value="/ephemeral",
+                help="Local path to working directory where logzips are extracted to",
+            )
+        )
+        if not workdir.exists() and st.button("Create working directory"):
+            workdir.mkdir(parents=True, exist_ok=True)
+
+        if workdir.exists():
+            numfiles = len(list(workdir.rglob("*")))
+            st.markdown(f"Working directory `{workdir}` currently contains {numfiles} files")
+
+            with st.form("zipload"):
+                # Display recents that were saved to st.session_state["recent_logzips"]
+                for zip_path in st.session_state.get("recent_logzips", []):
+                    st.markdown(f"- {zip_path}")
+                zip_path = st.text_input("From zip", value="")
+                if st.form_submit_button("Load"):
+                    # st.query_params.from_dict({"logzip": zip_path, "working_dir": str(workdir.resolve())})
+                    st.session_state["recent_logzips"] = st.session_state.get("recent_logzips", []) + [zip_path]
+                    download_zip_to_workdir(zip_path, workdir)
+                    st.rerun()
+
+            if zip_path:
+                try:
+                    st.download_button(
+                        label="Download ZIP",
+                        data=DistributedPath(uri=zip_path).upath().read_bytes(),
+                        file_name=Path(zip_path).name if "/" in zip_path else "logzip.zip",
+                        mime="application/zip",
+                    )
+                except Exception as e:
+                    st.warning(f"Could not download zip: {e}")
+    return workdir if (workdir and workdir.exists()) else None
+
+
+def st_groupselector(group_folders: list[Path]):
+    def display_option(p: Path):
+        return f"{p.name} ({len(list(filter(Path.is_dir, p.iterdir())))} items)"
+
+    selected_group = st.selectbox(
+        "Select group folder",
+        options=group_folders,
+        format_func=display_option,
+    )
+    return selected_group
+
+
+def st_batchselector(batch_path: Path):
+    """
+    Visualizes a batch that was already extracted to disk and can therefore be loaded from a Path.
+    """
+    item_folders = [item_folder for item_folder in batch_path.iterdir() if item_folder.is_dir()]
+    batch_indices = [int(f.name.split("_")[-1]) for f in item_folders]
+
+    df = pd.DataFrame(
+        [
+            {
+                "thumbnail": rgbnumpy_to_base64(iio.imread(f.joinpath("input_image.jpg"))),
+                "image_folder": str(f.absolute()),  # str because serialization otherwise fails
+                "batch_index": batch_index,
+            }
+            for f, batch_index in zip(item_folders, batch_indices)
+        ]
+    )
+    # sort by batch index
+    df = df.sort_values(by="batch_index").reset_index(drop=True)
+
+    st_df = st.dataframe(
+        df,
+        column_config={
+            "thumbnail": st.column_config.ImageColumn("Preview Image", help="Streamlit app preview screenshots")
+        },
+        on_select="rerun",
+        selection_mode="multi-row",
+        row_height=50,
+        # hide_index=True,
+        # on_change=lambda: print('onchange')
+    )
+    # st.write(df.selection)
+    return [df.iloc[row] for row in st_df.selection["rows"]]  # type: ignore
+
+
+def heatmap_with_sums_chart(
+    a: np.ndarray,
+    *,
+    row_title: str = "Row",
+    col_title: str = "Column",
+    scheme: str = "viridis",
+    sum_label: str = "Sum",
+):  # -> alt.LayerChart:
+    """Build an Altair heatmap with an extra Sum row/column and annotated values."""
+    import altair as alt
+
+    if a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("Expected a square 2D array (n x n).")
+
+    n = a.shape[0]
+
+    # Use only original cells for the color scale (exclude sums).
+    vmin = float(np.nanmin(a))
+    vmax = float(np.nanmax(a))
+
+    # Extend with Sum row/col
+    row_sums = a.sum(axis=1)
+    col_sums = a.sum(axis=0)
+    grand_total = a.sum()
+    ext = np.block(
+        [
+            [a, row_sums[:, None]],
+            [col_sums[None, :], np.array([[grand_total]])],
+        ]
+    )
+
+    row_labels = [str(i) for i in range(n)] + [sum_label]
+    col_labels = [str(i) for i in range(n)] + [sum_label]
+
+    df = pd.DataFrame(ext, index=row_labels, columns=col_labels)
+    long = df.rename_axis("row").reset_index().melt(id_vars="row", var_name="col", value_name="value")
+    long["is_sum"] = (long["row"] == sum_label) | (long["col"] == sum_label)
+
+    base = alt.Chart(long).encode(
+        x=alt.X("col:O", sort=col_labels, title=col_title),
+        y=alt.Y("row:O", sort=row_labels, title=row_title),
+    )
+
+    # Split into two rect layers so the legend/scale reflects only non-sum cells.
+    rect_values = (
+        base.transform_filter("!datum.is_sum")
+        .mark_rect()
+        .encode(
+            color=alt.Color(
+                "value:Q",
+                scale=alt.Scale(
+                    scheme=cast(Any, scheme),
+                    domain=[vmin, vmax],
+                    nice=True,
+                ),
+                legend=alt.Legend(
+                    title="Value",
+                    orient="bottom",
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("row:O", title="Row"),
+                alt.Tooltip("col:O", title="Column"),
+                alt.Tooltip("value:Q", title="Value"),
+            ],
+        )
+    )
+
+    rect_sums = (
+        base.transform_filter("datum.is_sum")
+        .mark_rect(color="#f2f2f2")
+        .encode(
+            tooltip=[
+                alt.Tooltip("row:O", title="Row"),
+                alt.Tooltip("col:O", title="Column"),
+                alt.Tooltip("value:Q", title="Value"),
+            ]
+        )
+    )
+
+    text_values = (
+        base.transform_filter("!datum.is_sum")
+        .mark_text(baseline="middle", color="white")
+        .encode(text=alt.Text("value:Q", format=".2f"))
+    )
+
+    text_sums = (
+        base.transform_filter("datum.is_sum")
+        .mark_text(baseline="middle", color="black", fontWeight="bold")
+        .encode(text=alt.Text("value:Q", format=".2f"))
+    )
+
+    # Give the chart a real height so it can't collapse to ~0px.
+    # (Still scales to container width via width="container".)
+    min_h = 320
+    target_h = 24 * (n + 1)
+    chart_height = max(min_h, target_h)
+
+    return (
+        (rect_values + rect_sums + text_values + text_sums)
+        .properties(
+            width="container",
+            height=chart_height,
+            autosize=alt.AutoSizeParams(type="fit-x", contains="padding"),
+        )
+        .configure_view(stroke=None)
+    )
+
+
+def m3_image_from_disk(item_dicts: list[dict], graphs: dict[str, np.ndarray] | None = None):
+    if graphs is not None:
+        # for g in graphs:
+        #     assert g[1].shape == (len(item_dicts), len(item_dicts))
+        if (
+            graph_name := st.selectbox(label="Select graph to visualize", options=["None"] + list(graphs.keys()))
+        ) in graphs:
+            st.altair_chart(
+                heatmap_with_sums_chart(
+                    graphs[graph_name],
+                    row_title="From",
+                    col_title="To",
+                ),
+                width="stretch",
+            )
+
+    images = []
+    for item_dict in item_dicts:
+        item_folder = Path(item_dict["image_folder"])
+        overlay_meta = json.loads(item_folder.joinpath("overlays_meta.json").read_text())
+        img2d = Image2D(
+            img=rgbnumpy_to_base64(img_npy := iio.imread(item_folder.joinpath("input_image.jpg"))),
+            overlay_groups=[
+                ImageOverlays(
+                    overlays=[
+                        ImageOverlay(
+                            data=rgbnumpy_to_base64(iio.imread(item_folder.joinpath(overlay_item["file_path"]))),
+                            classname=overlay_item["class_name"],
+                        )
+                        for overlay_item in overlay_meta["overlay_categories"][overlay_category]
+                    ],
+                    overlay_type=overlay_category,
+                )
+                for overlay_category in overlay_meta["overlay_categories"]
+            ],
+        )
+
+        img2d.caption = f"<span style='color:DarkSeaGreen'>{img_npy.shape}</span><br>"
+
+        if item_folder.joinpath("meta.json").exists():
+            img2d.desc = (item_meta_str := item_folder.joinpath("meta.json").read_text())
+            item_meta = json.loads(item_meta_str)
+            if "context" in item_meta:
+                img2d.caption += f"Context: <span style='color:orange'>{item_meta['context']}</span><br>"
+
+        if item_folder.joinpath("caption.txt").exists():
+            img2d.caption += item_folder.joinpath("caption.txt").read_text()
+
+        images.append(img2d)
+
+    m3_image(
+        key=f"image_{'_'.join([Path(x['image_folder']).name for x in item_dicts])}",
+        data=M3Image.Data(
+            images=images,
+        ),
+    )

@@ -1,176 +1,15 @@
 import logging
 import math
 import random
-from typing import (
-    Literal,
-    Optional,
-    Callable,
-    List,
-    Tuple,
-    Dict,
-    Any,
-)
-import os
-from zipfile import ZipFile
-from shutil import unpack_archive
-import requests
-from pathlib import Path
-
-from tqdm import tqdm
-from typing import List, Optional, Tuple, Dict, Any
-from pathlib import Path
-
-import torch
-from torch.utils.data import get_worker_info, Dataset
-import collections
 import re
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+
 import numpy as np
-
-from .DetectionDataset import DetectionDataset
-from .SemSegDataset import SemSegDataset
-
+import torch
+from skimage.draw import ellipse
+from torch.utils.data import Dataset
 
 np_str_obj_array_pattern = re.compile(r"[SaUO]")
-
-
-def batch_concat_with_meta(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    # Build the list of metainfo
-    meta_dicts: List[Dict] = [x for item in batch for x in item["meta"]]
-    for case_dict in batch:
-        if "meta" in case_dict:
-            case_dict.pop("meta")
-
-    # Build the training-relevant batch
-    res = batch_concat(batch)
-
-    # Reappend the meta info as list
-    res["meta"] = meta_dicts  # type: ignore
-    return res  # type: ignore
-
-
-def batch_concat(batch):
-    """
-    Adapted from https://github.com/pytorch/pytorch/blob/master/torch/utils/data/_utils/collate.py.
-
-    For datasets which return batches of variable size the function can be used to overwrite collate_fn
-    in a dataloader.
-    """
-    elem = batch[0]
-    elem_type = type(elem)
-
-    if isinstance(elem, torch.Tensor):
-        if elem.numel() == 0:
-            tensornums = [bool(t.numel()) for t in batch]
-            # assert True in tensornums, "All tensors empty for batch concat"
-            if not True in tensornums:
-                logging.info("All Tensors empty for batch concat :(")
-            else:
-                elem = batch[tensornums.index(True)]
-                elem_type = type(elem)
-
-        out = None
-        if get_worker_info() is not None:
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum(x.numel() for x in batch)
-            storage = elem.storage()._new_shared(numel)
-            out = elem.new(storage).resize_(sum([t.size(0) for t in batch]), *list(elem.size()[1:]))
-        return torch.concat(batch, out=out)
-    elif elem_type.__module__ == "numpy" and elem_type.__name__ != "str_" and elem_type.__name__ != "string_":
-        if elem_type.__name__ == "ndarray" or elem_type.__name__ == "memmap":
-            # array of string classes and object
-            if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
-                raise Exception(
-                    f"default_collate: batch must contain tensors, "
-                    + "numpy arrays, numbers, dicts or lists; found: {elem.dtype}"
-                )
-
-            return batch_concat([torch.as_tensor(b) for b in batch])
-        elif elem.shape == ():  # scalars
-            return torch.as_tensor(batch)
-    elif isinstance(elem, float):
-        return torch.tensor(batch, dtype=torch.float64)
-    elif isinstance(elem, int):
-        return torch.tensor(batch)
-    elif isinstance(elem, collections.abc.Mapping):
-        try:
-            return elem_type({key: batch_concat([d[key] for d in batch]) for key in elem})
-        except TypeError:
-            # The mapping type may not support `__init__(iterable)`.
-            return {key: batch_concat([d[key] for d in batch]) for key in elem}
-    elif isinstance(elem, tuple) and hasattr(elem, "_fields"):  # namedtuple
-        return elem_type(*(batch_concat(samples) for samples in zip(*batch)))
-    elif isinstance(elem, collections.abc.Sequence):
-        # check to make sure that the elements in batch have consistent size
-        it = iter(batch)
-        elem_size = len(next(it))
-        if not all(len(elem) == elem_size for elem in it):
-            raise RuntimeError("each element in list of batch should be of equal size.")
-        transposed = list(zip(*batch))  # It may be accessed twice, so we use a list.
-
-        if isinstance(elem, tuple):
-            return [batch_concat(samples) for samples in transposed]  # Backwards compatibility.
-        else:
-            try:
-                return elem_type([batch_concat(samples) for samples in transposed])
-            except TypeError:
-                # The sequence type may not support `__init__(iterable)` (e.g., `range`).
-                return [batch_concat(samples) for samples in transposed]
-
-    raise TypeError(batch_concat.format(elem_type))
-
-
-def download_and_extract_archive(
-    target: Path,
-    ds_download_link: str,
-    archive_type: Literal["infer", "zip", "targz"] = "infer",
-    delete_archive_after=True,
-    streaming_chunk_size=8192,
-) -> Path:
-    """
-    Given a parent folder such as root / "your_dataset" and a download link, downloads and extracts archived data.
-
-    Returns the path to the root directory in the archive.
-    """
-    logging.warn(f"Deprecated, use `from torchvision.datasets.utils import download_and_extract_archive`")
-    if not target.exists():
-        target.mkdir()
-
-    if archive_type == "infer":
-        if ds_download_link.lower().endswith(".zip"):
-            archive_type = "zip"
-        elif ds_download_link.lower().endswith(".tar.gz"):
-            archive_type = "targz"
-        else:
-            raise Exception(f"Cannot infer archive type from {ds_download_link}")
-
-    assert target.is_dir(), f"target {target} should be a directory"
-    archive_path = target / "ds_archive"
-    if not archive_path.exists():
-        print(f"Downloading {ds_download_link} into {archive_path}")
-        with open(archive_path, "wb") as f:
-            resp = requests.get(ds_download_link, stream=True)
-            for chunk in tqdm(resp.iter_content(chunk_size=streaming_chunk_size)):
-                f.write(chunk)
-
-    if archive_type == "zip":
-        with ZipFile(archive_path, "r") as zip_ref:
-            dirs = [target / d.filename for d in zip_ref.infolist() if d.is_dir()]
-            if not dirs[0].exists():
-                print(f"Unzipping {archive_path} into {target}")
-                zip_ref.extractall(target)
-    elif archive_type == "targz":
-        if len(os.listdir(target)) == 1:
-            unpack_archive(archive_path, extract_dir=target, format="gztar")
-    else:
-        raise Exception(f"Cannot work with archive type {archive_type}")
-
-    if delete_archive_after:
-        print(f"Removing the archive {archive_path}")
-        os.remove(archive_path)
-
-    print(f"Preparing data done")
-    return target
 
 
 class TransformedSubset(Dataset):
@@ -331,23 +170,23 @@ def train_val_split(
     return list(train_indices), list(val_indices)
 
 
-def semseg_from_detect_ds(ds: DetectionDataset):
-    """
-    Converts detection bboxed to a segmentation map of size HxW
-    """
+def convert_detectcase_to_semseg(
+    detectcase: Dict[str, Any], mask_type: Literal["box", "ellipse"] = "box"
+) -> Dict[str, Any]:
+    assert "image" in detectcase and "boxes" in detectcase and "labels" in detectcase
 
-    def convert_detectcase_to_semseg(detectcase: Dict[str, Any]) -> Dict[str, Any]:
-        assert "image" in detectcase and "boxes" in detectcase and "labels" in detectcase
+    mask = np.zeros(detectcase["image"].shape[1:], dtype=np.int64)  # H, W
 
-        mask = torch.zeros(detectcase["image"].shape)
+    for idx, box in enumerate(detectcase["boxes"].long().tolist()):
+        if mask_type == "box":
+            mask[box[1] : box[3], box[0] : box[2]] = detectcase["labels"][idx] + 1
+        elif mask_type == "ellipse":
+            x0, y0, x1, y1 = box
+            rr, cc = ellipse((y0 + y1) // 2, (x0 + x1) // 2, (y1 - y0) // 2, (x1 - x0) // 2, shape=mask.shape)
+            mask[rr, cc] = detectcase["labels"][idx] + 1
+        else:
+            raise ValueError(f"Unknown mask type {mask_type}")
 
-        for idx, box in enumerate(detectcase["boxes"].tolist()):
-            mask[box[0] : box[2], box[1] : box[3]] = detectcase["label"][idx]
+    detectcase["label"] = torch.from_numpy(mask).long()
 
-        return {"image": detectcase["image"], "label": mask.long()}
-
-    return SemSegDataset(
-        src_ds=ds,
-        src_transforms=convert_detectcase_to_semseg,
-        class_names=ds.vis_classes,
-    )
+    return detectcase

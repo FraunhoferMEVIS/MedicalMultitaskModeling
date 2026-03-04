@@ -1,17 +1,17 @@
-from typing import Dict, Any, Mapping, Tuple, List
+from typing import Any, Dict, List, Mapping, Tuple
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 
-from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
-from mmm.logging.type_ext import StepFeedbackDict
-from mmm.trainer.Loop import Loop, LoopConfig, TrainLoopConfig, ValLoopConfig
-from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.data_loading.MTLDataset import MTLDataset
 from mmm.data_loading.synthetic.mockup import ClassificationMockupDataset
 from mmm.data_loading.TrainValCohort import TrainValCohort
-from mmm.data_loading.MTLDataset import MTLDataset
+from mmm.logging.type_ext import StepFeedbackDict
+from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
+from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.trainer.Loop import Loop, LoopConfig, TrainLoopConfig, ValLoopConfig
 
 
 class CounterDS(Dataset[Dict[str, Any]]):
@@ -31,10 +31,17 @@ class TrackerClfTask(MTLTask):
     def __init__(self, train_n, val_n) -> None:
         config = MTLTask.Config(module_name=f"tracker{TrackerClfTask.num}")
         TrackerClfTask.num += 1
+
+        class D(MTLDataset):
+            @staticmethod
+            def get_mandatory_keys():
+                return ["i"]
+
         self.clf_cohort = TrainValCohort(
             TrainValCohort.Config(batch_size=(1, 1), shuffle_loaders=(False, False), num_workers=0),
-            MTLDataset(CounterDS(train_n), mandatory_case_keys=["i"], optional_case_keys=[]),
-            MTLDataset(CounterDS(val_n), mandatory_case_keys=["i"], optional_case_keys=[]),
+            D(CounterDS(train_n)),
+            D(CounterDS(val_n)),
+            for_task_name=config.module_name,
         )
         self.clf_cohort.prepare_epoch(0)
         self.batches = []

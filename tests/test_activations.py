@@ -1,4 +1,5 @@
 import torch
+
 from mmm.neural.activations import ActivationFn, ActivationFunctionConfig
 
 

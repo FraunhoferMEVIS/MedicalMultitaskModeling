@@ -1,12 +1,14 @@
 import json
-from functools import partial
 import logging
-from typing import Any
-from torch.utils.data import Dataset
-from mmm.BaseModel import BaseModel
+from functools import partial
 from pathlib import Path
+from typing import Any
 
-from .GeoAnno import GeoAnno
+from m3_sdk.geojson import GeoAnno
+from torch.utils.data import Dataset
+
+from mmm.BaseModel import BaseModel
+
 from .AnnoFilterConfig import AnnoFilterConfig
 
 

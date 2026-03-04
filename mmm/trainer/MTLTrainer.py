@@ -1,45 +1,36 @@
 from __future__ import annotations
-import os
-from copy import deepcopy, copy
-import traceback
-import wandb
-import json
-import logging
-from pathlib import Path
-from pydantic import Field
-
-from typing_extensions import Annotated
-from typing import Any, Callable, Dict, List, Optional, Iterable, Tuple, Literal
 
 import itertools
+import json
+import logging
+import os
+from copy import copy, deepcopy
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional
 
+import logfire
 import torch
-import torch.nn as nn
+import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn as nn
+import wandb
+from m3_sdk.DistributedPath import DistributedPath
+from pydantic import Field
+from torch.nn.parallel.distributed import DistributedDataParallel
+from typing_extensions import Annotated
 
-from mmm.mtl_modules.MTLModule import MTLModule
-from mmm.optimization.MTLOptimizer import MTLOptimizer
-from mmm.mtl_modules.tasks.MTLTask import MTLTask
-from mmm.mtl_modules.tasks.TaskModule import TaskModule
+from mmm.BaseModel import BaseModel
+from mmm.DataSplit import DataSplit
+from mmm.event_selectors import EventSelector, FixedEventSelector, RecurringEventSelector
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
-from mmm.trainer.Loop import Loop
-from mmm.utils import remove_folder_blocking_if_exists, recursive_equality
-from mmm.trainer.TaskPurpose import TaskPurpose
-from mmm.DataSplit import DataSplit
-from .CallbackType import CallbackType
-from mmm.event_selectors import (
-    EventSelector,
-    FixedEventSelector,
-    RecurringEventSelector,
-)
-from mmm.BaseModel import BaseModel
-from mmm.data_loading.DistributedPath import DistributedPath
+from mmm.mtl_modules.tasks.MTLTask import MTLTask
+from mmm.mtl_modules.tasks.TaskModule import TaskModule
 from mmm.optimization.MTLOptimizer import MTLOptimizer
-from mmm.trainer.Loop import TrainLoopConfig, ValLoopConfig
+from mmm.trainer.Loop import Loop, TrainLoopConfig, ValLoopConfig
+from mmm.utils import remove_folder_blocking_if_exists
 
-import torch.distributed as dist
-from torch.nn.parallel.distributed import DistributedDataParallel
+from .CallbackType import CallbackType
 
 
 class EarlyStoppingConfig(BaseModel):
@@ -71,7 +62,8 @@ class MTLTrainer:
             description="Maximum number of epochs. Can be overriden by fit().",
         )
 
-        checkpoint_cache_folder: Path = Field(
+        checkpoint_cache_folder: Path | None = Field(
+            # default=None,
             default_factory=lambda: Path(os.getenv("ML_DATA_OUTPUT", default="./")) / "trainer_checkpoints",
             description="""
 The parent folder where the trainer will store checkpoints.
@@ -124,16 +116,24 @@ The parent folder where the trainer will store checkpoints.
         self.rank, self.world_size = global_rank, world_size
         self.local_rank, self.local_world_size = local_rank, local_world_size
         self.mtl_tasks: List[MTLTask] = []
-        # self.eval_tasks: List[MTLTask] = []
         self.args: MTLTrainer.Config = args
         self.stages = [""]
+        self.eventqueue: str = ""
 
         # Not a nn.ModuleDict, because the trainer is not an nn.Module
         self.shared_blocks: Dict[str, SharedBlock] = {}
-        self.ddp_model = None
+        self.ddp_model: SharedModules | None = None
 
         self.state = self.State(epoch=0, step_counters={}, best_val_losses=None, avg_losses_per_epoch=[])
 
+        self.experiment_ckpt_folder: Path | None = None
+        if args.checkpoint_cache_folder is not None:
+            self.prepare_experiment_ckpt_folder(clear_checkpoints=clear_checkpoints)
+
+        self.mtl_optimizer = None
+        self.callbacks: Dict[CallbackType, Dict[str, Callable]] = {cb_type: {} for cb_type in CallbackType}
+
+    def prepare_experiment_ckpt_folder(self, clear_checkpoints: bool = False) -> None:
         self.experiment_ckpt_folder = self.args.checkpoint_cache_folder / self.experiment_name
         if self.rank == 0:
             if clear_checkpoints:
@@ -143,9 +143,6 @@ The parent folder where the trainer will store checkpoints.
                 logging.info(f"Created trainer's cache folder: {self.experiment_ckpt_folder}")
         if dist.is_initialized():
             dist.barrier()
-
-        self.mtl_optimizer = None
-        self.callbacks: Dict[CallbackType, Dict[str, Callable]] = {cb_type: {} for cb_type in CallbackType}
 
     def __repr__(self) -> str:
         res = f"Trainer config: {self.args.model_dump()}\n"
@@ -241,7 +238,9 @@ The parent folder where the trainer will store checkpoints.
         return export_module
 
     @torch.no_grad()
-    def save_blocks_native(self, file_path: DistributedPath, only_inference: bool = True):
+    def save_blocks_native(
+        self, file_path: DistributedPath | None, only_inference: bool = True, only_for_blocks: None | list[str] = None
+    ):
         """
         Wraps all shared blocks and tasks into a dictionary.
 
@@ -251,19 +250,31 @@ The parent folder where the trainer will store checkpoints.
         If the mmm code is slightly changed, the exported file will break.
         In that case, use the ONNX export.
         """
-        from mmm.labelstudio_ext.NativeBlocks import NativeBlocks
+        from mmm.api.M3Model import M3Model
 
-        exportdict = nn.ModuleDict(self.shared_blocks)
+        if only_for_blocks is None:
+            exportdict = nn.ModuleDict(self.shared_blocks)
+        else:
+            exportdict = nn.ModuleDict({k: v for k, v in self.shared_blocks.items() if k in only_for_blocks})
 
         for exporttask in self.mtl_tasks:
             if only_inference:
                 # A shallow copy is enough, because we do not modify the deeper structures
                 exporttask = copy(exporttask)
                 exporttask.cohort = None
+
+                # These attributes are not required for inference but might take up a lot of space
+                for attr in ["_grouper_meta", "_step_metrics", "_step_losses"]:
+                    if hasattr(exporttask, attr):
+                        delattr(exporttask, attr)
+
             exportdict[exporttask.get_name()] = exporttask
+
         if only_inference:
-            exportdict = exportdict.eval().cpu()
-        NativeBlocks.save_to_disk(file_path, exportdict)
+            exportdict = exportdict.eval()
+
+        if file_path is not None:
+            M3Model.save_to_disk(file_path, exportdict)
         return exportdict
 
     @torch.no_grad()
@@ -362,44 +373,13 @@ The parent folder where the trainer will store checkpoints.
         if dist.is_initialized():
             dist.barrier()
 
-        logging.info(f"Saving checkpoint to {folder_path}")
-        for k, v in self.shared_blocks.items():
-            if self.rank == 0:
+        if self.rank == 0:
+            logging.info(f"Saving checkpoint to {folder_path}")
+            for k, v in self.shared_blocks.items():
                 v.save_checkpoint(folder_path / k)
-            else:
-                v.save_checkpoint(folder_path / f"{k}{self.rank}")
-
-        # All checkpoints are created, now sanity check that all shared weights are identical
-        if dist.is_initialized():
-            dist.barrier()
-            if self.rank == 0 and self.world_size > 1:
-                for k, v in self.shared_blocks.items():
-                    shouldbestate = str(
-                        torch.load(
-                            folder_path / k / "module.ckpt",
-                            map_location=torch.device("cpu"),
-                        )["model_state"]
-                    )
-                    for other_rank in range(0, dist.get_world_size()):
-                        # Load the other state dict to cpu
-                        pk = f"{k}{other_rank}" if other_rank != 0 else k
-                        other_state = torch.load(
-                            folder_path / pk / "module.ckpt",
-                            map_location=torch.device("cpu"),
-                        )
-                        # if not recursive_equality(other_state, v.state_dict(), approx=True):
-                        otherstate_str = str(other_state["model_state"])
-                        if not otherstate_str == shouldbestate:
-                            # Save both string to text files for debugging
-                            with open(f"state_dict_{k}_rank0.txt", "w") as f:
-                                f.write(shouldbestate)
-                            with open(f"state_dict_{k}_rank{other_rank}.txt", "w") as f:
-                                f.write(otherstate_str)
-                            logging.error(f"Shared block {k} is not identical on rank 0 and rank {other_rank}")
-                        else:
-                            logging.debug(f"Shared block {k} is identical on rank 0 and rank {other_rank}")
 
         # Save the optimizer of rank 0
+        # Do not guard this with rank == 0, because different ranks can have different tasks
         if self.mtl_optimizer is None:
             logging.warning(f"Optimizer not initialized, initializing optimizer for: {folder_path}")
             self.init_optimizer()
@@ -459,7 +439,7 @@ The parent folder where the trainer will store checkpoints.
                             task.load_checkpoint(folder_path / task.get_name())
                             logging.info(f"Successfully loaded checkpoint of {task.get_name()}")
                         else:
-                            logging.warn(f"Couldn't find checkpoint of task {task.get_name()}")
+                            logging.warning(f"Couldn't find checkpoint of task {task.get_name()}")
                     except RuntimeError as e:
                         logging.warning(f"Couldn't load checkpoint for task {task.get_name()} due to {e}")
                     except ValueError as e:
@@ -474,7 +454,7 @@ The parent folder where the trainer will store checkpoints.
                         self.init_optimizer()
                     self.mtl_optimizer.load_checkpoint(folder_path / "trainer_optim")
                 except Exception as e:
-                    logging.warn(f"Couldn't load optimizer checkpoint {folder_path / 'trainer_optim'} due to {e}")
+                    logging.warning(f"Couldn't load optimizer checkpoint {folder_path / 'trainer_optim'} due to {e}")
 
             if load_meta:
                 self.state = self.State(**json.loads((folder_path / "meta.json").read_text()))
@@ -536,6 +516,7 @@ The parent folder where the trainer will store checkpoints.
                 if dist.is_initialized()
                 else None
             ),
+            eventqueue=self.eventqueue,
         )
         return loop.drain_to_dict()
 
@@ -553,13 +534,15 @@ The parent folder where the trainer will store checkpoints.
             self.state.step_counters,
             None,  # No optimizer validation,
             rank=self.rank,
+            eventqueue=self.eventqueue,
         )
         return loop.drain_to_dict()
 
     def check_workernum(self, auto_adjust=True):
         import math
-        from numpy.random import choice
         import os
+
+        from numpy.random import choice
 
         def adjust(ls: List[int], max_num: int):
             ls = [math.ceil((x / sum(ls)) * max_num) for x in ls]
@@ -574,14 +557,20 @@ The parent folder where the trainer will store checkpoints.
 
         # For training a safe number seems to be to use half the workers for pretraining and half for validation:
         workers = {task.args.module_name: task.cohort.args.num_workers for task in self.mtl_tasks}
-        logging.info(f"{workernum_available} workers available for pretraining tasks. You requested {workers}")
+        logfire.info(
+            "{workernum_available} workers available for pretraining tasks. You requested {workers}",
+            workernum_available=workernum_available,
+            workers=workers,
+        )
 
         if auto_adjust and sum(workers.values()) > workernum_available:
             new_workers = adjust(list(workers.values()), workernum_available)
             for new_worker_num, task in zip(new_workers, self.mtl_tasks):
                 task.cohort.args.num_workers = max(new_worker_num, 1)
             after_adjustment_workers = {task.args.module_name: task.cohort.args.num_workers for task in self.mtl_tasks}
-            logging.info(f"Workers changed to {after_adjustment_workers}")
+            logfire.info(
+                "Workers changed to {after_adjustment_workers}", after_adjustment_workers=after_adjustment_workers
+            )
         else:
             assert sum(workers.values()) <= workernum_available, (
                 f"You requested {workers} workers, "
@@ -590,16 +579,17 @@ The parent folder where the trainer will store checkpoints.
 
     def prepare_dataloading(self) -> None:
         # In some environments, requesting more workers than there are CPU cores results in an error:
-        self.check_workernum()
+        with logfire.span("Preparing dataloading in epoch {state.epoch}", state=self.state) as span:
+            self.check_workernum()
 
-        for task in self.mtl_tasks:
-            if self.args.rebuild_dataloaders.is_event(self.state.epoch):
-                task.cohort.terminate_workers()
-                task.cohort.data_loaders = (None, None)
-            if None in task.cohort.data_loaders:
-                task.cohort.prepare_epoch(epoch=self.state.epoch)
+            for task in self.mtl_tasks:
+                if self.args.rebuild_dataloaders.is_event(self.state.epoch):
+                    task.cohort.terminate_workers()
+                    task.cohort.data_loaders = (None, None)
+                if None in task.cohort.data_loaders:
+                    task.cohort.prepare_epoch(epoch=self.state.epoch)
 
-    def run_mtl_epoch(self) -> Tuple[Optional[List[float]], Optional[List[float]]]:
+    def run_mtl_epoch(self) -> tuple[Optional[List[float]], Optional[List[float]]]:
         """
         Returns None if no validation is performed. Otherwise, returns the average validation loss for each task.
         """
@@ -623,7 +613,10 @@ The parent folder where the trainer will store checkpoints.
         if train_result is not None:
             self.mtl_optimizer.after_loop_step(self.state.epoch, train_result, val_result)
         else:
-            logging.warn(f"Without training, no after_loop_step is performed ({self.state.epoch=})")
+            logfire.info(
+                "no after_loop_step is performed for epoch {state.epoch} because no training",
+                state=self.state,
+            )
 
         train_avg = (
             [sum(task_losses) / len(task_losses) for task_losses in train_result] if train_result is not None else None
@@ -643,30 +636,31 @@ The parent folder where the trainer will store checkpoints.
         return train_avg, val_avg
 
     def init_optimizer(self) -> None:
-        self.ddp_model: SharedModules = SharedModules(self.shared_blocks)
+        with logfire.span("Initializing MTL optimizer, do not modify shared blocks after this point"):
+            self.ddp_model = SharedModules(self.shared_blocks)
 
-        if dist.is_initialized():
-            # find_unused_parameters is required whenever we have a shared block that is not used by all tasks
-            self.ddp_model = DistributedDataParallel(
-                self.ddp_model,
-                device_ids=[int(self.local_rank)],
-                find_unused_parameters=True,
-            )  # type: ignore
+            if dist.is_initialized():
+                # find_unused_parameters is required whenever we have a shared block that is not used by all tasks
+                self.ddp_model = DistributedDataParallel(
+                    self.ddp_model,
+                    device_ids=[int(self.local_rank)],
+                    find_unused_parameters=True,
+                )  # type: ignore
 
-        self.mtl_optimizer = MTLOptimizer(
-            self.shared_blocks,
-            self.args.optim,
-            self.args.max_epochs,
-            # Scale the gradients to account for DDP averaging gradients
-            # While the docs say this is only relevant for the number of nodes:
-            # "When a model is trained on M nodes with batch=N,
-            # the gradient will be M times smaller
-            # when compared to the same model trained on a single node with batch=M*N"
-            # Other sources say that the gradient is averaged over all processes.
-            gradient_scale_factor=float(self.world_size),
-        )
-        for task in self.mtl_tasks:
-            self.mtl_optimizer.add_task(task)
+            self.mtl_optimizer = MTLOptimizer(
+                self.shared_blocks,
+                self.args.optim,
+                self.args.max_epochs,
+                # Scale the gradients to account for DDP averaging gradients
+                # While the docs say this is only relevant for the number of nodes:
+                # "When a model is trained on M nodes with batch=N,
+                # the gradient will be M times smaller
+                # when compared to the same model trained on a single node with batch=M*N"
+                # Other sources say that the gradient is averaged over all processes.
+                gradient_scale_factor=float(self.world_size),
+            )
+            for task in self.mtl_tasks:
+                self.mtl_optimizer.add_task(task)
 
     def get_summary_stats(self) -> Dict[str, Any]:
         module_summary = {}
@@ -685,10 +679,12 @@ The parent folder where the trainer will store checkpoints.
             logging.info("Starting a new training. Logging module's stats")
             wandb.log({f"report/{k}": v for k, v in self.get_summary_stats().items()})
         elif self.state.epoch > max_epochs:
-            logging.info(f"{max_epochs=} reached because {self.state.epoch=}")
+            logfire.info("{max_epochs=} reached because {state.epoch=}", state=self.state, max_epochs=max_epochs)
             return
         else:
-            logging.info(f"Resuming training at epoch {self.state.epoch=} until {max_epochs=}")
+            logfire.info(
+                "Resuming training at epoch {state.epoch=} until {max_epochs=}", state=self.state, max_epochs=max_epochs
+            )
 
         for _ in itertools.count():
             self._run_callbacks(CallbackType.each_epoch, self)
@@ -710,10 +706,9 @@ The parent folder where the trainer will store checkpoints.
                         self.create_checkpoint(f"bestbyvalidation{self.stages[self.state.stage_index]}")
 
             # Increment global epoch counter which is used for logging and is also checkpointed
-
             self.create_checkpoint("latest")
 
-            if self.state.epoch > max_epochs:
+            if self.state.epoch >= max_epochs:
                 logging.info(f"Reached max_epochs ({max_epochs}). Stopping trainer.fit().")
                 break
 

@@ -26,7 +26,7 @@ from mmm.data_loading.RegressionDataset import RegressionDataset
 from mmm.data_loading.TrainValCohort import TrainValCohort
 from mmm.logging.type_ext import StepMetricDict
 from mmm.logging.wandb_ext import build_wandb_image
-from mmm.mtl_modules.shared_blocks.Grouper import Grouper
+from mmm.mtl_modules.shared_blocks.Grouper import Grouper, GroupUsage
 from mmm.mtl_modules.shared_blocks.SharedBlock import SharedBlock
 from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
@@ -58,7 +58,10 @@ class SurvivalPredictionTask(MTLTask):
     class Config(MTLTask.Config):
         encoder_key: str = "encoder"
         squeezer_key: str = "squeezer"
-        grouper_key: str | None = None
+        grouper_key: GroupUsage = Field(
+            default=GroupUsage(grouper_key="grouper"),
+            description="If the key is set, assumes a grouper to exist in the shared modules.",
+        )
         loss_fn: Annotated[LossConfigs, Field(discriminator="loss_type")] = SurvivalLossConfig(
             loss_type="bce_surv", alpha=0.2
         )
@@ -124,8 +127,8 @@ class SurvivalPredictionTask(MTLTask):
         _, hidden_vector = shared_blocks[self.args.squeezer_key](pyr)
         hidden_vector = self.flatten(hidden_vector)
 
-        if self.args.grouper_key in list(shared_blocks.keys()):
-            hidden_vector, self._grouper_weights = shared_blocks[self.args.grouper_key](
+        if self.args.grouper_key.grouper_key in list(shared_blocks.keys()):
+            hidden_vector, self._grouper_meta = shared_blocks[self.args.grouper_key.grouper_key](
                 hidden_vector, supercase_indices
             )
 
@@ -163,18 +166,18 @@ class SurvivalPredictionTask(MTLTask):
         if self.args.grouper_key in list(shared_blocks.shared_modules.keys()):
             # A batch with ids ["id1", "s3", "s3"] would become [0, 1, 1]
             grouper: Grouper = dict(shared_blocks.shared_modules.items())[self.args.grouper_key]
-            supercase_indices = grouper.extract_ids_from_batch([x["group_id"] for x in batch["meta"]]).to(
-                self.torch_device
-            )
+            supercase_indices = grouper.extract_ids_from_batch(
+                [x["group_id"] for x in batch["meta"]], for_task_name=self.get_name()
+            ).to(self.torch_device)
 
             # the targets need to be grouped as well, currently y is a (B,) tensor with class indices
             # For each unique supercase index, we need to find the corresponding class index
-            y = grouper.group_targets(y, supercase_indices)
+            y = grouper.group_targets(y, supercase_indices, self.args.grouper_key)
             event = grouper.group_targets(torch.Tensor([x["event"] for x in batch["meta"]]), supercase_indices)
         else:
             supercase_indices = None
             event = torch.Tensor([x["event"] for x in batch["meta"]])
-            self._grouper_weights = None
+            self._grouper_meta = None
 
         y_hat = shared_blocks.forward((x, supercase_indices, add_x), self.forward)
 
@@ -236,7 +239,7 @@ class SurvivalPredictionTask(MTLTask):
     def _visualize_preds(
         self, training_imgs, step_metrics: Dict, metas: List[Dict], supercase_indices
     ) -> Dict[str, Any]:
-        vis_n = min(self._takeout_vis_budget(), training_imgs.size(0))
+        vis_n = min(self.ask_for_visualization(), training_imgs.size(0))
 
         if vis_n <= 0:
             return {}
@@ -245,8 +248,8 @@ class SurvivalPredictionTask(MTLTask):
             # Select one of the groups for visualization
             group_index = random.choice(list(set(supercase_indices.cpu().numpy())))
             vis_indices = torch.where(supercase_indices == group_index)[0].cpu()
-            if self._grouper_weights is not None:
-                vis_cases_weights = self._grouper_weights[vis_indices]
+            if self._grouper_meta is not None:
+                vis_cases_weights = self._grouper_meta[vis_indices]
                 rows = int(np.sqrt(len(vis_indices)))
                 # cols = training_ims[vis_indices].shape[0] // rows
                 grid_img = make_grid(training_imgs[vis_indices], nrow=rows)
@@ -264,7 +267,6 @@ class SurvivalPredictionTask(MTLTask):
                 hazard: {step_metrics["hazard"][group_index]}
                 target: {step_metrics["targets"][group_index]}
                 event: {step_metrics['event'][group_index]}
-                additional info: {metas[vis_indices[0]]["additional_info"]}
                 {[metas[i] for i in vis_indices]=}
             """
             else:
@@ -301,18 +303,18 @@ class SurvivalPredictionTask(MTLTask):
         log_dict = {}
 
         risk = torch.sum(torch.cumprod(torch.from_numpy(metrics["hazard"]), dim=1), dim=1).numpy()
+        if sum(metrics["event"]) >= 2:
+            log_dict["c-index"] = concordance_index(
+                event_times=metrics["targets"].squeeze(),
+                predicted_scores=risk.squeeze(),
+                event_observed=metrics["event"].squeeze().astype(bool),
+            )
 
-        log_dict["c-index"] = concordance_index(
-            event_times=metrics["targets"].squeeze(),
-            predicted_scores=risk.squeeze(),
-            event_observed=metrics["event"].squeeze().astype(bool),
-        )[0]
-
-        log_dict["reverse-c-ind"] = concordance_index(
-            event_times=metrics["targets"].squeeze(),
-            predicted_scores=risk.squeeze() * -1,
-            event_observed=metrics["event"].squeeze().astype(bool),
-        )[0]
-        print_str = f'{print_str} - c-index: {log_dict["c-index"]}'
+            log_dict["reverse-c-ind"] = concordance_index(
+                event_times=metrics["targets"].squeeze(),
+                predicted_scores=risk.squeeze() * -1,
+                event_observed=metrics["event"].squeeze().astype(bool),
+            )
+            print_str = f'{print_str} - c-index: {log_dict["c-index"]}'
 
         return log_dict, print_str

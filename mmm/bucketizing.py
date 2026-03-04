@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import re
-from typing import Callable, Dict, Optional, List, Literal, Tuple, TypeVar
-from mmm.BaseModel import BaseModel
+from typing import Callable, Dict, List, Literal, Optional, Tuple, TypeVar
+
 from pydantic import Field
+
+from mmm.BaseModel import BaseModel
 
 
 class Bucket(BaseModel):
