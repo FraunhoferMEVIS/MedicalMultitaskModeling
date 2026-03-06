@@ -264,38 +264,28 @@ test-pip-installation:
     # - pip install git+https://${sdk_token}:${sdk_token_pass}@gitlab.cc-asp.fraunhofer.de/mevis-histo/tissue-concepts/m3-sdk.git MedicalMultitaskModeling==$PKGVERSION --index-url https://gitlab-ci-token:${CI_JOB_TOKEN}@$(echo ${CI_API_V4_URL} | sed 's|https://||')/projects/${CI_PROJECT_ID}/packages/pypi/simple
     # - python -c "from mmm.interactive import *"
 
-# update-python-package-public:
-#   when: manual
-#   only:
-#     - release
-#   image: $PYTHON_IMAGE
-#   stage: deploy
-#   needs:
-#     [
-#       test-no-extras,
-#       test-mtl-convergence,
-#       test-extra-api,
-#       test-extra-export,
-#       get-version,
-#     ]
-#   before_script:
-#     - pipx install uv
-#     - uv sync --with deploy
-#   script:
-#     - uv run python3 -V
-#     - poetry build
-#     - poetry publish --username __token__ --password ${PYPI_TOKEN}
+update-python-package-public:
+  when: manual
+  only:
+    - release
+  image: $DEBIAN_IMAGE
+  stage: deploy
+  needs:
+    [
+      test-build-package,
+      test-pip-installation,
+      get-version,
+    ]
+  script:
+    - uv publish --username __token__ --password ${PYPI_TOKEN}
 
-# test-mmm-installation-public:
-#   only:
-#     - release
-#   needs: [get-version, update-python-package-public]
-#   image: $PYTHON_IMAGE
-#   variables:
-#     MMM_LICENSE_ACCEPTED: "i accept"
-#   stage: deploy
-#   before_script:
-#     - apt-get update && apt install python3-opencv -y
-#   script:
-#     - pip install MedicalMultitaskModeling==$PKGVERSION
-#     - python -c "from mmm.interactive import *"
+test-mmm-installation-public:
+  when: manual
+  needs: [get-version]
+  image: $PYTHON_IMAGE
+  variables:
+    MMM_LICENSE_ACCEPTED: "i accept"
+  stage: deploy
+  script:
+    - pip install MedicalMultitaskModeling==$PKGVERSION
+    - python -c "from mmm.interactive import *"

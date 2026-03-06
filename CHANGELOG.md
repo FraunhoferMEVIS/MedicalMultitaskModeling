@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.1
+
+- Fix prediction in Labelstudio integration
+
 ## 1.6.0
 
 - Change `model_id` to `finetuning_id` for API endpoints. "Model" now only refers to the underlying foundation model

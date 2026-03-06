@@ -1,6 +1,6 @@
 [project]
 name = "MedicalMultitaskModeling"
-version = "1.6.0"
+version = "1.6.1"
 description = "Multitask learning for medical data"
 authors = [
     { name = "Raphael Schäfer", email = "jan.raphael.schaefer@mevis.fraunhofer.de" },

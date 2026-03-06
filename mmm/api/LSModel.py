@@ -17,9 +17,10 @@ from typing import TYPE_CHECKING, Literal
 import logfire
 from m3_sdk.types import CompressType
 
-from mmm.api.api_worker import cache_instances
+from mmm.api.api_worker import cache_instances, predict
 from mmm.api.DLModel import DLModel, _get_dataset_key
 from mmm.api.functions.compression import CacheInstances
+from mmm.api.functions.deeplearning import Predict
 from mmm.api.utils import download_image
 from mmm.settings import mtl_settings
 
@@ -97,13 +98,21 @@ class LSModel(DLModel):
         if len(tasks) >= 1 and bool(
             mtl_settings.kv.exists(f"{mtl_settings.adapter_prefix}:{finetuning_id}:latest:model")
         ):
-            return await self.inference(
-                [self.process_subject_for_m3(MSubject(**t), project_id) for t in tasks],
-                labeling_config,
-                finetuning_id,
-            )
+            async_results = [
+                predict.delay(
+                    Predict.Args(
+                        finetuning_id=finetuning_id,
+                        subjects=[subj],
+                        t=self.cfg.pixel_confidence_threshold,
+                        label_config=labeling_config,
+                    )
+                )
+                for subj in [self.process_subject_for_m3(MSubject(**t), project_id) for t in tasks]
+            ]
 
-        logfire.info(
+            return {"results": [r.get().predictions[0].model_dump() for r in async_results]}
+
+        logfire.warning(
             "Model {finetuning_id} has not been trained yet, skipping prediction.",
             finetuning_id=finetuning_id,
         )
