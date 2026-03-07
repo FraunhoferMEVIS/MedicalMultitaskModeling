@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.2
+
+- Fix readme example and installation instructions
+- Add model: WSC_MTL_TINY
+
 ## 1.6.1
 
 - Fix prediction in Labelstudio integration

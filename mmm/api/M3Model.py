@@ -31,10 +31,12 @@ M3_MODELS = {
     "encoder-1.0.4.pt.zip": "https://data.rslide.org/encoder-1.0.4.pt.zip",
     "tc-nopanda.pt.zip": "https://data.rslide.org/tc-nopanda.pt.zip",
     "unicorn-encoder.pt.zip": "https://drive.usercontent.google.com/download?id=1MShT_e-Srb6tHyRpcA3DvNNHyRaihOx_&export=download&confirm=t",
+    "wsc-mtl-tiny.pt.zip": "https://huggingface.co/FraunhoferMEVIS/WholeSlideConcepts/resolve/main/WSC-MTL-tiny.pt.zip?download=true",
 }
 DEFAULT_MODEL = "encoder-1.0.4.pt.zip"
 TC_NOPANDA = "tc-nopanda.pt.zip"
 UNICORN_ENCODER = "unicorn-encoder.pt.zip"
+WSC_MTL_TINY = "wsc-mtl-tiny.pt.zip"
 
 
 class M3Model(FoundationModel):
