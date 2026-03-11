@@ -212,7 +212,7 @@ class CyclicTaskSampler(BaseSampler):
                         tasks_that_stopped.append(task.get_name())
 
                     if self.args.mode == "break_with_shortest_loader":
-                        assert len(tasks_that_stopped) == 1
+                        assert len(tasks_that_stopped) == 1, f"{tasks_that_stopped=}, {task.get_name()=}"
                         logfire.debug(
                             "Breaking loop with task {task_name} because it was shortest", task_name=task.get_name()
                         )

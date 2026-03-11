@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     ignore_class_value: int = -1
 
     # Logging
+    efficiency_hints: bool = False
     default_log_folder: DistributedPath | None = Field(
-        None,
+        default=None,
         description="Used for storing files such as predictions.",
     )
     max_classes_detailed_logging: int = 25
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
 
     # Integrations
     labelstudio: dict = Field(
-        {"base_url": "http://localhost:8080", "api_key": "apitoken"},
+        default={"base_url": "http://localhost:8080", "api_key": "apitoken"},
         description="Used to authenticate a Labelstudio client as label_studio_sdk.client.Labelstudio(**labelstudio)",
     )
 

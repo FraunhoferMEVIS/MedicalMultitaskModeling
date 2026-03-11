@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.3
+
+- Improve fine-tuning example for public use
+
 ## 1.6.2
 
 - Fix readme example and installation instructions

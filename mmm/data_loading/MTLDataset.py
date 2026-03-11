@@ -250,7 +250,7 @@ class MTLDataset(Dataset[SrcCaseType]):
         )
 
     def get_dataloader(self, **kwargs) -> DataLoader:
-        with logfire.span("Building dataloader for {cohort_settings}", cohort_settings=self.loader_info):
+        with logfire.span("Building dataloader for {cohort_settings.task_name}", cohort_settings=self.loader_info):
             dl_kwargs = dict(
                 collate_fn=self.collate_fn,
                 # a whole day in seconds

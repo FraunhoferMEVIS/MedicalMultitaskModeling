@@ -35,7 +35,7 @@ class FineTuner(MTLTrainer):
 
     class Config(MTLTrainer.Config):
         finetune_blocks: list[str] = Field(
-            default=["decoder", "grouper", "mixer"],
+            default=["squeezer", "decoder", "grouper", "mixer"],
             description="Only blocks whose name exactly matches one of these patterns will be finetuned.",
         )
         checkpoint_cache_folder: Path | None = Field(default=None, description="Finetuning does not use checkpoints.")

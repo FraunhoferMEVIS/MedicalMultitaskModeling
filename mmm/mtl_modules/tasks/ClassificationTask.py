@@ -62,29 +62,6 @@ class ClassificationTask(MTLTask):
         )
         head: Literal["pretraining", "pretraining_gelu"] = "pretraining"
 
-    @classmethod
-    def from_torchvision_style(
-        cls: Type[ClassificationTask],
-        hidden_dim: int,
-        class_names: List[str],
-        task_config: Config,
-        cohort_config: TrainValCohort.Config,
-        train_ds: Dataset[Tuple[PIL_Image, torch.Tensor]],
-        val_ds: Dataset[Tuple[PIL_Image, torch.Tensor]],
-    ) -> ClassificationTask:
-        """
-        Automatically builds a task from torchvision default datasets.
-
-        Torchvision datasets provide their training examples using tuples (PIL_Image, class_index: Integer-torch-tensor)
-        """
-        cohort = TrainValCohort(
-            cohort_config,
-            ClassificationDataset.from_torchvision(train_ds, class_names=class_names),
-            # If no validation set is specified, the trainer will use cross-validation from the training set
-            ClassificationDataset.from_torchvision(val_ds, class_names=class_names),  # if val_ds is not None else None
-        )
-        return cls(hidden_dim, class_names, task_config, cohort)
-
     def __init__(
         self,
         hidden_dim: int,

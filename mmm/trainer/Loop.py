@@ -270,7 +270,9 @@ class Loop:
                 disable=not self.args.log_args.progress_bar,
             ) as pbar:
                 for i, (batch, task) in enumerate(task_iterator):
-                    if (batch_extraction_s := time.perf_counter() - iteration_start_time) > 1.0:
+                    if (
+                        batch_extraction_s := time.perf_counter() - iteration_start_time
+                    ) > 1.0 and mtl_settings.efficiency_hints:
                         logfire.warning(
                             "Task {task_name} on rank {rank} blocked for {batch_extraction_s:.2f} s in iteration {i}",
                             task_name=task.get_name(),
@@ -303,7 +305,10 @@ class Loop:
                         self.sync_on()
 
                     with logfire.span(
-                        "Running step for {task_name} on rank {rank}", task_name=task.get_name(), rank=self.rank
+                        "Running step for {task_name} on rank {rank} in {train_mode}",
+                        task_name=task.get_name(),
+                        rank=self.rank,
+                        train_mode="train" if self.training_mode else "val",
                     ):
                         try:
                             with self.optim.forward_context if self.training_mode else nullcontext():
@@ -311,8 +316,11 @@ class Loop:
                         except Exception as e:
                             if "out of memory" in str(e):
                                 logfire.error(
-                                    "Task {task_name} on rank {self.rank} encountered {e}, reduce size of {batch}!",
+                                    "Task {task_name} on rank {rank} encountered {e}, reduce size of {batch}!",
                                     task_name=task.get_name(),
+                                    rank=self.rank,
+                                    e=e,
+                                    batch=batch,
                                 )
                                 raise e
                             else:

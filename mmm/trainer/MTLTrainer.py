@@ -27,6 +27,7 @@ from mmm.mtl_modules.shared_blocks.SharedModules import SharedModules
 from mmm.mtl_modules.tasks.MTLTask import MTLTask
 from mmm.mtl_modules.tasks.TaskModule import TaskModule
 from mmm.optimization.MTLOptimizer import MTLOptimizer
+from mmm.settings import mtl_settings
 from mmm.trainer.Loop import Loop, TrainLoopConfig, ValLoopConfig
 from mmm.utils import remove_folder_blocking_if_exists
 
@@ -482,7 +483,8 @@ The parent folder where the trainer will store checkpoints.
         logging.info(f"{allocated_workers=} are already allocated for {for_split=}")
         take_workers_from = DataSplit.train if for_split is DataSplit.val else DataSplit.val
         if len(mp.active_children()) - allocated_workers[for_split.value] > len(os.sched_getaffinity(0)) // 2:
-            logging.warning(f"Killing workers {take_workers_from=} because too many workers would be allocated")
+            if mtl_settings.efficiency_hints:
+                logging.warning(f"Killing workers {take_workers_from=} because too many workers would be allocated")
             for t in self.mtl_tasks:
                 t.cohort.terminate_datasplit_workers(take_workers_from)
             return True
