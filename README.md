@@ -30,7 +30,7 @@ This project depends on [m3-sdk](https://github.com/FraunhoferMEVIS/m3-sdk).
 
 - The `DEFAULT_MODEL` is the model presented in [Overcoming data scarcity in biomedical imaging with a foundational multi-task model](https://doi.org/10.1038/s43588-024-00662-z)
 - The weights for `TC_NOPANDA` are connected to [Tissue Concepts: supervised foundation models in computational pathology](https://www.sciencedirect.com/science/article/pii/S0010482524017062?via%3Dihub)
-- The `UNICORN_ENCODER` achieved first place in the first foundation model benchmark, UNICORN.
+- The `UNICORN_ENCODER` achieved first place in the first foundation model benchmark, UNICORN. Currently, only the 2D vision backbone (encoder) is publicly available.
 - The `WSC_MTL_TINY` is a tiny model presented in [Whole Slide Concepts: A Supervised Foundation Model For Pathological Images](https://arxiv.org/abs/2507.05742v3)
 
 
